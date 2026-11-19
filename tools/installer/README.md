@@ -47,9 +47,12 @@ THIRD-PARTY-NOTICES.md are; default the repo root), `-NoSetupExe`, `-NoSourceChe
 ## What Setup does on the user's PC
 
 * Stops a running copy, copies `program\` to `%LOCALAPPDATA%\Programs\FluidWallpaper` and `data\` to
-  `%APPDATA%\FluidWallpaper` (an existing settings.ini is first saved as `settings-backup-<date>.ini`; presets with
-  the same name are replaced, the user's other presets stay).
-* Shortcuts on the desktop and in the Start menu: on-off, next look, uninstall.
+  `%APPDATA%\FluidWallpaper`. On an update the existing settings.ini is first saved as `settings-backup-<date>.ini`,
+  then Setup asks whether to keep it (`-KeepSettings`: kept; `-Quiet` alone: replaced); presets and look files with
+  the same name are replaced, the user's others stay.
+* Shortcuts: on the desktop on-off and next; in the Start menu the app itself (starts it, or opens its Settings when
+  it runs), on-off, next and uninstall (its own icon). A shortcut Windows refuses to create (a protected Desktop) is
+  reported at the end and does not stop the install.
 * Asks whether to start with Windows (HKCU `Run`); an update keeps the user's earlier choice. Adds the entry under
   Windows Settings -> Apps.
 * Starts the wallpaper.

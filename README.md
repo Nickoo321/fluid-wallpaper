@@ -8,7 +8,7 @@ One exe, no runtime to install, no network access.
 
 ## Install
 
-**[Download FluidWallpaper-Setup-2026.11.18.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.18.exe)**
+**[Download FluidWallpaper-Setup-2026.11.19.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.19.exe)**
 (1.7 MB) and run it. No admin rights are needed. The same package as a zip and the SHA-256 sums are in
 [`release/`](release).
 
@@ -20,7 +20,8 @@ One exe, no runtime to install, no network access.
   `%APPDATA%\FluidWallpaper`. Setup asks whether it should start with Windows.
 
 **On / off:** the "Fluid Wallpaper on-off" shortcut on the desktop, or the tray icon -> Exit.
-**Next look:** the "Fluid Wallpaper next" shortcut, or the tray menu.
+**Next colours:** the "Fluid Wallpaper next" shortcut, or the tray menu. The slow shift to the next pair of colours
+starts right away (first new colour after about half a minute).
 **Settings:** the tray icon -> Settings.
 **Uninstall:** Windows Settings -> Apps -> Fluid Wallpaper, or the Start menu entry. It asks whether to delete your
 settings too.

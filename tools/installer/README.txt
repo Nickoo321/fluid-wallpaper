@@ -1,10 +1,11 @@
 Fluid Wallpaper
 ===============
 
-A live, slowly moving fluid / oil / ink wallpaper. It draws behind your desktop
-icons and changes look by itself every few minutes (with a short fade to black
-in between). It pauses on its own while a game or another fullscreen or
-maximized window covers the desktop.
+A live, slowly moving oil wallpaper. It draws behind your desktop icons and
+changes its colours by itself: it rests on one pair of colours for a while,
+then shifts slowly to another. It starts dark for about the first minute. It
+pauses on its own while a game or another fullscreen or maximized window
+covers the desktop.
 
 Needs: Windows 10 or 11, 64-bit, and a graphics card with DirectX 12.
 
@@ -25,11 +26,13 @@ ON / OFF
   You can also right-click the Fluid Wallpaper tray icon -> Exit.
   When it is off, your normal Windows wallpaper is back.
 
-NEXT MODE
-  The wallpaper changes its look by itself every few minutes. To skip ahead,
-  double-click "Fluid Wallpaper next" on the desktop (also in the Start menu;
-  Ctrl+Alt+N when the on-off shortcut has a keyboard shortcut too). It fades
-  through black to the next mode. The tray menu has Next and Previous as well.
+NEXT
+  To move on to other colours sooner, double-click "Fluid Wallpaper next" on
+  the desktop (also in the Start menu and in the tray menu; Ctrl+Alt+N when
+  the on-off shortcut has a keyboard shortcut too). The shift to the next
+  pair of colours then starts right away. It is a slow change on purpose: the
+  first new colour shows after about half a minute, and it takes a few
+  minutes to finish. A press while a change is already under way does nothing.
 
 SETTINGS
   Click / right-click the Fluid Wallpaper icon in the taskbar tray (maybe
@@ -40,8 +43,9 @@ HDR
   Optional. It looks right with Windows HDR on or off.
 
 UPDATE
-  Run the newer Setup over the old one. Your old settings.ini is saved as
-  settings-backup-<date>.ini in %APPDATA%\FluidWallpaper first.
+  Run the newer Setup over the old one. It asks whether to keep your settings;
+  either way the old settings.ini is first saved as settings-backup-<date>.ini
+  in %APPDATA%\FluidWallpaper.
 
 UNINSTALL
   Start menu -> Fluid Wallpaper -> "Uninstall Fluid Wallpaper", or Windows

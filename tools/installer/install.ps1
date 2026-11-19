@@ -13,9 +13,9 @@
 #   -NoStop             do not stop a running copy first
 #   -Quiet              no message boxes
 #
-# Update: an existing settings.ini is copied to settings-backup-<yyyyMMdd-HHmmss>.ini
-# and then replaced by the package's (unless -KeepSettings). Presets with the same
-# name are replaced; the user's other presets stay.
+# Update: an existing settings.ini is copied to settings-backup-<yyyyMMdd-HHmmss>.ini; then
+# Setup ASKS whether to keep it (-KeepSettings: kept without asking; -Quiet alone: replaced by
+# the package's). Presets and look files with the same name are replaced; the user's others stay.
 [CmdletBinding()]
 param(
     [string]$InstallDir = '',
@@ -75,14 +75,25 @@ Get-ChildItem -LiteralPath $srcProgram -File | ForEach-Object {
 New-Item -ItemType Directory -Force -Path $DataDir | Out-Null
 $settingsDst = Join-Path $DataDir 'settings.ini'
 $backup = ''
+$settingsKept = $false
 if (Test-Path -LiteralPath $settingsDst) {
     $stamp = Get-Date -Format 'yyyyMMdd-HHmmss'
     $backup = Join-Path $DataDir ('settings-backup-' + $stamp + '.ini')
     for ($n = 2; Test-Path -LiteralPath $backup; $n++) { $backup = Join-Path $DataDir ('settings-backup-' + $stamp + '-' + $n + '.ini') }
     Copy-Item -LiteralPath $settingsDst -Destination $backup -Force
     Say "  settings backup: $backup"
-    if (-not $KeepSettings) { Copy-Item -LiteralPath (Join-Path $srcData 'settings.ini') -Destination $settingsDst -Force }
-    else { Say '  -KeepSettings: settings.ini left as it was' }
+    # An update never throws the user's own settings away unasked: -KeepSettings keeps them, otherwise Setup asks
+    # (-Quiet without -KeepSettings: replaced; the backup above stays either way).
+    $keepSettings = [bool]$KeepSettings
+    if (-not $keepSettings -and -not $Quiet) {
+        Add-Type -AssemblyName System.Windows.Forms
+        $r = [System.Windows.Forms.MessageBox]::Show(
+            "Fluid Wallpaper is already set up on this PC.`r`n`r`nKeep your current settings?`r`n`r`nYes = keep them.`r`nNo = use this version's settings (your old ones are saved as a backup file).",
+            'Fluid Wallpaper', 'YesNo', 'Question')
+        $keepSettings = ($r -eq [System.Windows.Forms.DialogResult]::Yes)
+    }
+    if (-not $keepSettings) { Copy-Item -LiteralPath (Join-Path $srcData 'settings.ini') -Destination $settingsDst -Force }
+    else { Say '  settings.ini left as it was'; $settingsKept = $true }
 } else {
     Copy-Item -LiteralPath (Join-Path $srcData 'settings.ini') -Destination $settingsDst -Force
 }
@@ -107,17 +118,27 @@ $hotkey = ''
 $hkFile = Join-Path $srcProgram 'hotkey.txt'
 if (Test-Path -LiteralPath $hkFile) { $hotkey = (Get-Content -LiteralPath $hkFile -TotalCount 1).Trim() }
 
+# A shortcut that cannot be written must not abort the install half way (Windows "Controlled folder access"
+# protects the Desktop on some PCs): it is noted and named in the closing message, the rest goes on.
+$linkFails = New-Object System.Collections.Generic.List[string]
 function New-FwShortcut([string]$path, [string]$target, [string]$arguments, [string]$hk, [string]$desc, [string]$icon = '') {
-    New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
-    $s = $wsh.CreateShortcut($path)
-    $s.TargetPath = $target
-    $s.Arguments = $arguments
-    $s.WorkingDirectory = $InstallDir
-    if ($icon) { $s.IconLocation = "$icon,0" } else { $s.IconLocation = "$exeDst,0" }
-    $s.Description = $desc
-    if ($hk) { $s.Hotkey = $hk }
-    $s.Save()
+    try {
+        New-Item -ItemType Directory -Force -Path (Split-Path -Parent $path) | Out-Null
+        $s = $wsh.CreateShortcut($path)
+        $s.TargetPath = $target
+        $s.Arguments = $arguments
+        $s.WorkingDirectory = $InstallDir
+        if ($icon) { $s.IconLocation = "$icon,0" } else { $s.IconLocation = "$exeDst,0" }
+        $s.Description = $desc
+        if ($hk) { $s.Hotkey = $hk }
+        $s.Save()
+    } catch {
+        $linkFails.Add($path)
+        Say "  could not create the shortcut $path ($($_.Exception.Message))"
+    }
 }
+# the plain entry people look for in the Start menu: starts the wallpaper, or opens its Settings when it runs already
+New-FwShortcut (Join-Path $startDir 'Fluid Wallpaper.lnk') $exeDst '' '' 'Start Fluid Wallpaper (opens its settings when it is already running)'
 $toggleArgs = '"' + $vbs + '"'
 New-FwShortcut (Join-Path $desktopDir 'Fluid Wallpaper on-off.lnk') $wscript $toggleArgs $hotkey 'Turn Fluid Wallpaper on or off'
 New-FwShortcut (Join-Path $startDir 'Fluid Wallpaper on-off.lnk') $wscript $toggleArgs '' 'Turn Fluid Wallpaper on or off'
@@ -129,7 +150,10 @@ $nextHotkey = ''
 if ($hotkey) { $nextHotkey = 'CTRL+ALT+N' }     # only when the on-off shortcut carries a hotkey too
 New-FwShortcut (Join-Path $desktopDir 'Fluid Wallpaper next.lnk') $exeDst '--cycle-next' $nextHotkey 'Skip to the next Fluid Wallpaper mode' $nextIco
 New-FwShortcut (Join-Path $startDir 'Fluid Wallpaper next.lnk') $exeDst '--cycle-next' '' 'Skip to the next Fluid Wallpaper mode' $nextIco
-New-FwShortcut (Join-Path $startDir 'Uninstall Fluid Wallpaper.lnk') $psExe ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallDir 'uninstall.ps1') + '"') '' 'Remove Fluid Wallpaper'
+# its own icon (a bin on red), so it is never mistaken for the on-off shortcut, which wears the app's icon
+$unIco = Join-Path $InstallDir 'uninstall.ico'
+if (-not (Test-Path -LiteralPath $unIco)) { $unIco = '' }
+New-FwShortcut (Join-Path $startDir 'Uninstall Fluid Wallpaper.lnk') $psExe ('-NoProfile -ExecutionPolicy Bypass -File "' + (Join-Path $InstallDir 'uninstall.ps1') + '"') '' 'Remove Fluid Wallpaper' $unIco
 
 # 5. registry: autostart (the app's own "start with Windows" value, src/ui/ui_model.cpp
 #    SetAutostart: HKCU\...\Run, value FluidWallpaper = "<exe path>" in quotes) + Uninstall entry
@@ -173,9 +197,10 @@ if (-not $NoLaunch) { Start-Process -FilePath $exeDst -WorkingDirectory $Install
 $msg = "Fluid Wallpaper $version is installed." + $(if ($isUpdate) { ' (update)' } else { '' }) +
        "`r`n`r`nTurn it on or off with the 'Fluid Wallpaper on-off' shortcut on the desktop" +
        $(if ($hotkey) { " (" + ($hotkey -replace '^Alt\+Ctrl\+', 'Ctrl+Alt+') + ")" } else { '' }) +
-       ".`r`nSkip to the next mode with 'Fluid Wallpaper next'" + $(if ($nextHotkey) { ' (Ctrl+Alt+N)' } else { '' }) +
+       ".`r`nMove on to other colours with 'Fluid Wallpaper next'" + $(if ($nextHotkey) { ' (Ctrl+Alt+N)' } else { '' }) +
        ".`r`nSettings: the Fluid Wallpaper tray icon." +
-       $(if ($backup) { "`r`n`r`nYour previous settings were saved as`r`n$backup" } else { '' })
+       $(if ($settingsKept) { "`r`n`r`nYour settings were kept." } elseif ($backup) { "`r`n`r`nYour previous settings were saved as`r`n$backup" } else { '' }) +
+       $(if ($linkFails.Count) { "`r`n`r`nWindows did not allow $($linkFails.Count) shortcut(s) to be created (it may be protecting the Desktop). The Start menu entries and the tray icon work without them." } else { '' })
 Say ''
 Say $msg
 if (-not $Quiet) {

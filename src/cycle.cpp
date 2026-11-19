@@ -1762,12 +1762,22 @@ void CycleManualOverride(const char* why) {
 }
 
 void CycleNext() {
+    // NEXT while the colour director holds the colours (user 2026-11-18: "Start the next shift now"): a Scheme
+    // stage is only the director's base, so the stage switch below shows nothing; the press then ALSO ends the
+    // director's hold, and its next colour change starts at once (DirectorSkip). With the cycle off the director's
+    // change is all a press can mean.
+    if (g_renderer && s_phase == CYCLE_OFF && DirectorActive()) {
+        if (DirectorSkip()) Log("[cycle] next (cycle off): the colour director starts its next change now\n");
+        return;
+    }
     if (!g_renderer || s_phase == CYCLE_OFF) return;
     LandScheme(*g_renderer);                 // review 2026-10-04: draw from the stage on screen
     if (s_phase == CYCLE_OFF) return;
     if (s_phase == CYCLE_WARMUP) UndoBlackCount();   // ...and never count a stage still in black
     const int n = PickNext();
     Log("[cycle] next -> %d\n", n + 1);
+    if (s_phase == CYCLE_DWELL && DirectorActive() && (!Valid(n) || n == s_cur || WantsScheme(n)) && DirectorSkip())
+        Log("[cycle] next: the colour director holds the colours; it starts its next change now\n");
     if (Valid(n) && n != s_cur) BeginSwitch(*g_renderer, n);
     if (s_phase == CYCLE_WARMUP) RecountBlack();     // replaced or not: what waits in black counts once
 }

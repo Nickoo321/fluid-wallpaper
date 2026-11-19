@@ -682,6 +682,16 @@ const float kChLvMono = 1.4f, kChLvPair = 1.3f;
 const float kChDyeK = 2.5f;
 int   s_ch = CH_WHITE;
 float s_cT = 0.0f, s_cLen = 0.0f;                  // time in the step, its planned length
+// NEXT (DirectorSkip; the "next" shortcut, the tray's Next stage, the Settings button). While the director runs, a
+// cycle stage is only its base, so a press changed nothing on screen. The user's call 2026-11-18 on what a press
+// should do: "Start the next shift now". The hold of the still on screen (WHITE or PAIR) ends at once and the draw is
+// among the OTHER pairs' stills, so a colour change always follows (the same pair's other lighting is no answer to
+// "next"). Pressed during a light glide (CLOSE / OPEN) it waits for the hold that follows; pressed while a change
+// is already on screen (the trip, the darkroom walk) it is dropped. Never pressed = today, draw for draw.
+// A garnish move in flight (the DASH: ~2.5 min on the live cadence, and every hold ends with one) is not walked to
+// its end: it is wound down from where its envelope stands in at most kSkipOut seconds, then the hold ends.
+bool  s_skip = false, s_skipWound = false;
+const float kSkipOut = 10.0f;
 float s_l1C = 0.0f, s_l1From = 0.0f, s_l1To = 0.0f;   // light 1's centre (absolute deg), SWAP's glide
 bool  s_dimFromPair = false;
 float s_keep = 0.0f;                               // T8 connections: the share keeper's cover offset
@@ -954,16 +964,41 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
     const float pourK = a.directorPourK > 0.0f ? a.directorPourK * a.filmDyeK[0] : 0.0f;
     // T8 direct darkroom (director_dark_path 1) and, on it, the rated pool of stills (2)
     const bool direct = a.directorDarkPath >= 1, pool = a.directorDarkPath == 2;
+    // NEXT: only a hold (or the light glide before one) can take it; anything else is already a change on screen
+    if (s_skip && s_ch != CH_WHITE && s_ch != CH_PAIR && s_ch != CH_CLOSE && s_ch != CH_OPEN) {
+        Log("[director] t=%.1f NEXT dropped: a change is already on screen (%s)\n", s_clock, kChapName[s_ch]);
+        s_skip = false; s_skipWound = false;
+    }
+    // the hold is over: its time is up, or NEXT was pressed (a DASH in flight finishes first, as at any hold's end).
+    // Asked right AFTER garnish() in the two hold steps, where the hold's end has always been tested.
+    bool over = false, skip = false;
+    auto holdEnd = [&]() {
+        over = (s_cT >= s_cLen || s_skip) && s_move == M_NONE;
+        skip = over && s_skip;
+        if (skip) { s_skip = false; s_skipWound = false; }
+    };
+    // NEXT with a garnish move in flight: the move's clock is put on a short way out that starts at the envelope's
+    // present value (Smooth(u) = e, the smoothstep's inverse), so nothing jumps; asked right BEFORE garnish()
+    auto windDown = [&]() {
+        if (!s_skip || s_skipWound || s_move == M_NONE) return;
+        const float e = fminf(fmaxf(MoveEnv(), 0.0f), 1.0f);
+        const float u = 0.5f - sinf(asinf(1.0f - 2.0f * e) / 3.0f);
+        s_mIn = 0.0f; s_mHold = 0.0f; s_mOut = kSkipOut; s_mt = (1.0f - u) * kSkipOut;
+        s_skipWound = true;
+        Log("[director] t=%.1f NEXT: the %s is wound down from %.2f in %.1f s\n", s_clock, kMoveName[s_move], e, u * kSkipOut);
+    };
     switch (s_ch) {
     case CH_WHITE:
+        windDown();
         garnish();
-        if (pool && s_cT >= s_cLen && s_move == M_NONE) {   // T8 looks: the next still by rating
+        holdEnd();
+        if (pool && over) {                        // T8 looks: the next still by rating
             const bool first = s_firstWhite;
             s_firstWhite = false;
-            PoolDraw(0, first);
+            PoolDraw(0, first || skip);
             Log("[director] t=%.1f POOL %ls white -> %ls %s (rating %.0f%s)\n", s_clock, s_combos[s_cur].name.c_str(),
                 s_combos[s_plCombo].name.c_str(), s_plMode ? "pair" : "white", LookRate(s_plCombo, s_plMode),
-                first ? ", first move" : "");
+                first ? ", first move" : skip ? ", NEXT pressed" : "");
             if (s_plCombo == s_cur) {              // this combo's darkroom pair: the lights close
                 s_plCombo = -1;
                 s_l1C = SafelightEnd(o.hue, o.patch);
@@ -977,12 +1012,12 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
             }
             break;
         }
-        if (s_cT >= s_cLen && s_move == M_NONE && (a.directorDarkShare < 1.0f || a.directorDarkPath == 1)) {
+        if (over && (a.directorDarkShare < 1.0f || a.directorDarkPath == 1)) {
             // T8 order: the darkroom (today's walk, or with director_dark_path 1 the direct PAIR) or the white trip
             const bool first = s_firstWhite && a.directorDarkShare < 1.0f;
             s_firstWhite = false;
             const float u = DsU();
-            if (first || !(u < a.directorDarkShare)) {
+            if (first || skip || !(u < a.directorDarkShare)) {   // NEXT: the trip to another combo, never the darkroom
                 PickNext();
                 s_pour = PO_RECEDE; s_pt = 0.0f;
                 Log("[director] t=%.1f CHAPTER %ls: TRIP under white to %ls (u %.3f, dark share %.2f%s)\n", s_clock,
@@ -998,7 +1033,7 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
                 break;
             }
         }
-        if (s_cT >= s_cLen && s_move == M_NONE) {
+        if (over) {
             s_l1C = SafelightEnd(o.hue, o.patch);
             s_dimFromPair = false;
             go(CH_DIM, glide(35.0f));
@@ -1080,12 +1115,15 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
         break;
     case CH_PAIR:
         pair(1.0f); if (!direct) dense(1.0f);      // T8 direct path: the tank keeps its own fluid
+        windDown();
         garnish();
-        if (s_cT >= s_cLen && s_move == M_NONE) {
+        holdEnd();
+        if (over) {
             if (pool) {                            // T8 looks: the next still by rating; every way out is OPEN
-                PoolDraw(1, false);
-                Log("[director] t=%.1f POOL %ls pair -> %ls %s (rating %.0f)\n", s_clock, s_combos[s_cur].name.c_str(),
-                    s_combos[s_plCombo].name.c_str(), s_plMode ? "pair" : "white", LookRate(s_plCombo, s_plMode));
+                PoolDraw(1, skip);                 // NEXT: among the other combos' stills only
+                Log("[director] t=%.1f POOL %ls pair -> %ls %s (rating %.0f%s)\n", s_clock, s_combos[s_cur].name.c_str(),
+                    s_combos[s_plCombo].name.c_str(), s_plMode ? "pair" : "white", LookRate(s_plCombo, s_plMode),
+                    skip ? ", NEXT pressed" : "");
                 if (s_plCombo == s_cur) s_plCombo = -1;   // this combo's white pair: OPEN, then its hold
                 if (s_plCombo >= 0 && s_plMode == 1) {    // another combo's darkroom pair: the link in the darkroom
                     s_next = s_plCombo; s_plCombo = -1;
@@ -1229,6 +1267,7 @@ void Step(float dt, const LiquidAcidConfig& a, float selfSig, const FluidRendere
         if (s_t >= s_len && a.directorStyle == 1 && a.directorDemo != 1) {   // the chapters, from the white pair
             s_phase = P_CHAP; s_ch = CH_WHITE; s_cT = 0.0f; s_cLen = RestLen(a); s_move = M_NONE; s_gap = U(30.0f, 70.0f);
             s_firstWhite = true;                   // T8 order: the first move is never the darkroom
+            s_skip = false; s_skipWound = false;   // a NEXT from before this engage is not carried over
             s_plCombo = -1;                        // T8 looks: no still in flight
             if (a.directorHold > 0.5f) {           // cadence: the first WHITE holds director_hold, then the dash
                 s_cLen *= a.directorHold / fmaxf(a.directorRest, 10.0f);
@@ -1396,6 +1435,19 @@ void DirectorSetLogger(void (*fn)(const char*)) { s_log = fn; }
 void DirectorSeed(unsigned seed) { s_seed = seed; s_seeded = false; }
 void DirectorFastForward(float seconds) { s_ff = seconds > 0.0f ? seconds : 0.0f; }
 bool DirectorActive() { return s_phase != P_OFF; }
+bool DirectorSkip() {                              // NEXT: see s_skip
+    if (s_phase == P_CHAP) {
+        s_skip = true;
+        Log("[director] t=%.1f NEXT pressed (%s)\n", s_clock, kChapName[s_ch]);
+        return true;
+    }
+    if (s_phase == P_REST) {                       // director_style 0: the rest ends, the trip follows
+        s_t = fmaxf(s_t, s_len);
+        Log("[director] t=%.1f NEXT pressed: the rest ends\n", s_clock);
+        return true;
+    }
+    return false;                                  // engaging, mid trip or letting go: nothing to skip
+}
 
 // T8 looks: the stills' ratings (PoolDraw). mode 0 = the white pair, 1 = the darkroom pair.
 int   DirectorLookCount() { EnsureRates(); return (int)s_combos.size(); }

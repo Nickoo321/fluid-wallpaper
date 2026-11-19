@@ -19,6 +19,10 @@ void  DirectorFastForward(float seconds);
 // Once per shown frame, right AFTER ClocksTick, in both loops.
 void  DirectorTick(FluidRenderer& r, float dt);
 bool  DirectorActive();
+// NEXT (the "next" shortcut / tray / Settings button while the director holds the colours; user 2026-11-18: "Start
+// the next shift now"): the hold of the still on screen ends and the next still is drawn among the OTHER pairs, so
+// the user's slow shift starts at once. true = taken (pending or done); false = nothing to skip right now.
+bool  DirectorSkip();
 // T8 looks (user 2026-11-18: "each is supposed to be rated, and then normalized ... Put it into the UI"): every
 // STILL = a combo's white pair (mode 0) or its darkroom pair (mode 1) has a rating 0..10, 5 until rated. With
 // [liquid_acid] director_dark_path = 2 the next rest is drawn with chance rating / sum of ratings. The Settings

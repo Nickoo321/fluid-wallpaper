@@ -61,6 +61,7 @@ else {
 }
 if ($Public -and -not $Hotkey) { $Hotkey = 'none' }
 if (-not $LicenseDir) { $LicenseDir = $repo }
+$LicenseDir = (Resolve-Path $LicenseDir).Path      # absolute: .NET file calls do not follow PowerShell's location
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 $OutDir = (Resolve-Path $OutDir).Path
 
@@ -371,6 +372,11 @@ foreach ($n in @('fw-common.ps1', 'toggle.ps1', 'toggle.vbs', 'uninstall.ps1')) 
 $skipIco = Join-Path $repo 'assets\skip-next.ico'
 if (Test-Path -LiteralPath $skipIco) { Copy-Item -LiteralPath $skipIco -Destination (Join-Path $stProg 'skip-next.ico') -Force }
 else { Info 'assets\skip-next.ico not found: the next shortcut will use the exe icon' }
+# the icon of the Uninstall shortcut (tools\installer\make-uninstall-icon.py draws it), so it cannot be mistaken
+# for the on-off shortcut, which wears the app's own icon
+$unIco = Join-Path $repo 'assets\uninstall.ico'
+if (Test-Path -LiteralPath $unIco) { Copy-Item -LiteralPath $unIco -Destination (Join-Path $stProg 'uninstall.ico') -Force }
+else { Info 'assets\uninstall.ico not found: the uninstall shortcut will use the exe icon' }
 Copy-Text (Join-Path $here 'README.txt') (Join-Path $stProg 'README.txt') @{ '{HOTKEY}' = $hkText }
 Copy-Text (Join-Path $here 'README.txt') (Join-Path $stage 'README.txt') @{ '{HOTKEY}' = $hkText }
 Copy-Text (Join-Path $here 'install.ps1') (Join-Path $stage 'install.ps1') $null
