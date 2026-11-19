@@ -6,6 +6,15 @@ desktop, and works with Windows HDR on or off.
 
 One exe, no runtime to install, no network access.
 
+![The oil look: orange, red and violet oil with dark droplets on a black desktop](images/oil-1.jpg)
+
+<p>
+  <img src="images/oil-2.jpg" width="49%" alt="The oil look in blue and pink">
+  <img src="images/oil-3.jpg" width="49%" alt="The oil look in cyan and violet">
+</p>
+
+Frames of the default oil look as the installer ships it, a minute or so apart.
+
 ## Install
 
 **[Download FluidWallpaper-Setup-2026.11.19.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.19.exe)**
