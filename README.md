@@ -45,7 +45,7 @@ Useful switches: `--console` (a diagnostics console), `--stats`, `--hdr on|off`,
 frame without a window and exit; `--shot-delay N` seconds of simulation first).
 
 Configuration is `%APPDATA%\FluidWallpaper\settings.ini`. The Settings window writes it live; a hand-edited file is
-read at the next start. The look files the default cycle uses are in `reference\configs` and `reference\presets`.
+read at the next start. The settings, look files and presets a fresh install starts with are in `tools\installer\data`.
 
 ### Build the installer
 
@@ -62,8 +62,8 @@ is the default settings, looks and presets a fresh install starts with. See `too
   rendering), `director.cpp` (the colour director), `cycle.cpp` (the look cycle), `ui/` (the Settings window).
 - `src/third_party/imgui/` Dear ImGui, unchanged.
 - `src_oil/`, `src_acid/`, `src_ink3d/` the proofs of concept.
-- `reference/` look files (ini).
-- `tools/installer/` the installer and its default data.
+- `tools/installer/` the installer scripts and `data/`, the default settings, look files and presets.
+- `release/` the built installer.
 
 ## Licence and credits
 
