@@ -4,7 +4,7 @@ A live wallpaper for Windows: slow oil, ink and fluid simulations drawn behind y
 It changes its colours and its look by itself over minutes, pauses while a game or a fullscreen window covers the
 desktop, and works with Windows HDR on or off.
 
-One exe, no runtime to install, no network access.
+One exe, no runtime to install. It keeps itself up to date from this page.
 
 ![The oil look: orange, red and violet oil with dark droplets on a black desktop](images/oil-1.jpg)
 
@@ -17,7 +17,7 @@ Frames of the default oil look as the installer ships it, a minute or so apart.
 
 ## Install
 
-**[Download FluidWallpaper-Setup-2026.11.19.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.19.exe)**
+**[Download FluidWallpaper-Setup-2026.11.21.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.21.exe)**
 (1.7 MB) and run it. No admin rights are needed. The same package as a zip and the SHA-256 sums are in
 [`release/`](release).
 
@@ -34,10 +34,17 @@ starts right away (first new colour after about half a minute).
 **Settings:** the tray icon -> Settings.
 **Uninstall:** Windows Settings -> Apps -> Fluid Wallpaper, or the Start menu entry. It asks whether to delete your
 settings too.
+**Updates:** from version 2026.11.21 on it updates itself. At most once a day (when you sign in to Windows, or turn
+the wallpaper on with its shortcut) it looks at [`release/`](release) here; when a newer version is there it downloads
+it, checks its SHA-256 and installs it without asking. Your settings are kept. It waits while a game or film fills
+the screen. To switch that off, create an empty file named `no-auto-update.txt` in `%APPDATA%\FluidWallpaper`.
+A copy older than 2026.11.21 does not do this: run the newer Setup over it once.
 
 ## Privacy
 
-The program never uses the network. Its log file (`%APPDATA%\FluidWallpaper\FluidWallpaper.log`) stays on your PC.
+The wallpaper itself never uses the network. The update check downloads a short list, and a new version when there is
+one, from this repository; it sends nothing about you or your PC. The log files (`FluidWallpaper.log` and `update.log`
+in `%APPDATA%\FluidWallpaper`) stay on your PC.
 When the wallpaper pauses for a fullscreen program, the log names that program's exe (never its window title).
 
 ## Build from source

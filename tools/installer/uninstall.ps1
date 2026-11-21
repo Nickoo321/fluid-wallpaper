@@ -71,6 +71,7 @@ if (Test-Path -LiteralPath $startDir) { Remove-Item -LiteralPath $startDir -Recu
 # 3. registry
 if (-not $NoRegistry) {
     Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'FluidWallpaper' -ErrorAction SilentlyContinue
+    Remove-ItemProperty -Path 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Run' -Name 'FluidWallpaperUpdate' -ErrorAction SilentlyContinue   # the self-update's sign-in entry
     $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FluidWallpaper'
     if (Test-Path $u) { Remove-Item -Path $u -Recurse -Force }
 }

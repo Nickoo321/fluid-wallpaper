@@ -367,7 +367,7 @@ elseif (Test-Path -LiteralPath $ToggleShortcut) {
 if ($hk) { Info "hotkey: $hk" } else { Info 'hotkey: none' }
 $hkText = 'none set'
 if ($hk) { $hkText = ($hk -replace '^Alt\+Ctrl\+', 'Ctrl+Alt+') + ' (works while the desktop shortcut exists)' }
-foreach ($n in @('fw-common.ps1', 'toggle.ps1', 'toggle.vbs', 'uninstall.ps1')) { Copy-Text (Join-Path $here $n) (Join-Path $stProg $n) $null }
+foreach ($n in @('fw-common.ps1', 'toggle.ps1', 'toggle.vbs', 'uninstall.ps1', 'update.ps1', 'update.vbs')) { Copy-Text (Join-Path $here $n) (Join-Path $stProg $n) $null }
 # the icon of the "next mode" shortcut (install.ps1 falls back to the exe icon without it)
 $skipIco = Join-Path $repo 'assets\skip-next.ico'
 if (Test-Path -LiteralPath $skipIco) { Copy-Item -LiteralPath $skipIco -Destination (Join-Path $stProg 'skip-next.ico') -Force }

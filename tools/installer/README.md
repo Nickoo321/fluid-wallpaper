@@ -55,7 +55,24 @@ THIRD-PARTY-NOTICES.md are; default the repo root), `-NoSetupExe`, `-NoSourceChe
   reported at the end and does not stop the install.
 * Asks whether to start with Windows (HKCU `Run`); an update keeps the user's earlier choice. Adds the entry under
   Windows Settings -> Apps.
+* Registers the silent self-update: a second HKCU `Run` value, `FluidWallpaperUpdate` = wscript + `update.vbs
+  -DelaySec 90` (its own value, because the app's Settings window rewrites `FluidWallpaper`); `toggle.ps1` also
+  starts it when it turns the wallpaper on. Not written while `no-auto-update.txt` is in the data folder.
 * Starts the wallpaper.
+
+## The self-update (2026-11-21)
+
+`update.ps1` (program folder; hidden through `update.vbs`): at most once every 20 hours it downloads
+`release/SHA256.txt` from the public repo (raw.githubusercontent.com), takes the newest `FluidWallpaper-<v>.zip`
+named there, and when `<v>` is above this copy's `version.txt` downloads that zip, compares its SHA-256 with the
+list, unpacks it and runs ITS `install.ps1 -Quiet -KeepSettings` (`-NoLaunch` when the wallpaper was off). A
+fullscreen window in front postpones it. Every failure is silent; `update.log` in the data folder says what
+happened. So publishing an update = a higher `-Version` in `release/` and nothing else: every installed copy from
+2026.11.21 on follows within a day. A copy older than that has no updater and needs one manual Setup run.
+The checksum guards the download against damage, not against someone who controls the repository: whoever can
+push to it decides what every installed copy runs.
+Test it only in a sandbox (never against a real install on the build PC): every test switch of install.ps1 is
+handed on, plus `-BaseUrl <local folder>`, `-DryRun`, `-NoFullscreenCheck`, `-Force`.
 
 Silent: `FluidWallpaper-Setup-<version>.exe /Q` (starts with Windows; `Install.cmd -Quiet -NoAutostart` from the
 zip for a silent install that does not).

@@ -11,6 +11,11 @@ try {
         $exe = Join-Path $PSScriptRoot 'FluidWallpaper.exe'
         if (-not (Test-Path -LiteralPath $exe)) { throw "$exe is missing. Run the Fluid Wallpaper setup again." }
         Start-Process -FilePath $exe -WorkingDirectory $PSScriptRoot
+        # the silent self-update: update.ps1 decides (once a day at most); it must never be in the way of the start
+        $upd = Join-Path $PSScriptRoot 'update.vbs'
+        if (Test-Path -LiteralPath $upd) {
+            try { Start-Process -FilePath (Join-Path $env:SystemRoot 'System32\wscript.exe') -ArgumentList ('"' + $upd + '" -DelaySec 60') } catch { }
+        }
     }
 } catch {
     try {

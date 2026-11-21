@@ -176,6 +176,13 @@ if (-not $NoRegistry) {
     if ($wantRun) {
         New-ItemProperty -Path $run -Name 'FluidWallpaper' -Value ('"' + $exeDst + '"') -PropertyType String -Force | Out-Null
     }
+    # The silent self-update (update.ps1, once a day at most): its OWN sign-in entry, so it does not hang on the
+    # app's "start with Windows" value, which the Settings window rewrites. Not written while the user has
+    # switched updates off (no-auto-update.txt in the data folder).
+    $upd = Join-Path $InstallDir 'update.vbs'
+    if ((Test-Path -LiteralPath $upd) -and -not (Test-Path -LiteralPath (Join-Path $DataDir 'no-auto-update.txt'))) {
+        New-ItemProperty -Path $run -Name 'FluidWallpaperUpdate' -Value ('"' + $wscript + '" "' + $upd + '" -DelaySec 90') -PropertyType String -Force | Out-Null
+    }
     $u = 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Uninstall\FluidWallpaper'
     New-Item -Path $u -Force | Out-Null
     $vals = [ordered]@{
@@ -199,6 +206,7 @@ $msg = "Fluid Wallpaper $version is installed." + $(if ($isUpdate) { ' (update)'
        $(if ($hotkey) { " (" + ($hotkey -replace '^Alt\+Ctrl\+', 'Ctrl+Alt+') + ")" } else { '' }) +
        ".`r`nMove on to other colours with 'Fluid Wallpaper next'" + $(if ($nextHotkey) { ' (Ctrl+Alt+N)' } else { '' }) +
        ".`r`nSettings: the Fluid Wallpaper tray icon." +
+       "`r`nIt keeps itself up to date from its GitHub page (README.txt says how to turn that off)." +
        $(if ($settingsKept) { "`r`n`r`nYour settings were kept." } elseif ($backup) { "`r`n`r`nYour previous settings were saved as`r`n$backup" } else { '' }) +
        $(if ($linkFails.Count) { "`r`n`r`nWindows did not allow $($linkFails.Count) shortcut(s) to be created (it may be protecting the Desktop). The Start menu entries and the tray icon work without them." } else { '' })
 Say ''

@@ -43,9 +43,16 @@ HDR
   Optional. It looks right with Windows HDR on or off.
 
 UPDATE
-  Run the newer Setup over the old one. It asks whether to keep your settings;
-  either way the old settings.ini is first saved as settings-backup-<date>.ini
-  in %APPDATA%\FluidWallpaper.
+  It updates itself. At most once a day (when you sign in to Windows, or turn
+  the wallpaper on with the on-off shortcut) it looks at the project's GitHub
+  page; when a newer version is there it downloads it, checks it, and installs
+  it without asking. Your settings are kept, and a backup of settings.ini is
+  saved first as settings-backup-<date>.ini in %APPDATA%\FluidWallpaper. It
+  waits while a game or film fills the screen.
+  To turn that off: create an empty file named no-auto-update.txt in
+  %APPDATA%\FluidWallpaper. What it did is in update.log in the same folder.
+  By hand: run the newer Setup over the old one. It asks whether to keep your
+  settings.
 
 UNINSTALL
   Start menu -> Fluid Wallpaper -> "Uninstall Fluid Wallpaper", or Windows
@@ -53,8 +60,11 @@ UNINSTALL
   It asks whether to delete the settings too.
 
 PRIVACY
-  It never uses the network. Its log file (FluidWallpaper.log in
-  %APPDATA%\FluidWallpaper) never leaves your PC.
+  The wallpaper itself never uses the network. The update check (see UPDATE)
+  downloads a short list, and a new version when there is one, from the
+  project's GitHub page; it sends nothing about you or your PC. The log files
+  (FluidWallpaper.log, update.log in %APPDATA%\FluidWallpaper) never leave
+  your PC.
 
 LICENCE
   MIT. See LICENSE.txt and THIRD-PARTY-NOTICES.txt in the program folder.
