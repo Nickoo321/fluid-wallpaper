@@ -73,6 +73,29 @@ tools\installer\build-installer.ps1 -Exe build\FluidWallpaper.exe -Data tools\in
 It writes `dist\FluidWallpaper-<version>.zip` and `dist\FluidWallpaper-Setup-<version>.exe`. `tools\installer\data`
 is the default settings, looks and presets a fresh install starts with. See `tools\installer\README.md`.
 
+## Add a feature
+
+The whole source is in this repository under the MIT licence, and it is the source of the Setup in `release/`. You,
+or an AI coding agent working for you, can change it and build your own copy.
+
+1. Fork or clone this repository and build it (see [Build from source](#build-from-source)).
+2. Turn the installed wallpaper off with its on-off shortcut, then run your `build\FluidWallpaper.exe`. Only one copy
+   runs at a time, and your build uses the same settings in `%APPDATA%\FluidWallpaper`.
+3. To share the feature, open a pull request against `main`.
+
+Where to start: a setting is a field of `FluidConfig` in `src/fluid.h`, read from the ini in `src/main.cpp`
+(`LoadConfigFromIni`) and shown in the Settings window by `src/ui/`. The simulation and the shaders are
+`src/fluid.cpp` and `src/shaders.h`. `--shot file.png` renders one frame without a window, which is the quick way to
+check a change.
+
+For a pull request: one feature per request; a new setting defaults to off, so the picture stays the same for
+everyone who does not turn it on; and check it with Windows HDR on and off if it changes colours or brightness.
+
+**Your build and the updates:** an installed copy updates itself. If you put your own exe into
+`%LOCALAPPDATA%\Programs\FluidWallpaper`, the next published version replaces it. To keep your build, create the
+empty file `no-auto-update.txt` in `%APPDATA%\FluidWallpaper`, or run your exe from the build folder and leave the
+installed copy alone.
+
 ## Layout
 
 - `src/` the wallpaper: `main.cpp` (app shell, tray, HDR detection, ini), `fluid.cpp` + `shaders.h` (simulation and
