@@ -26,7 +26,7 @@ cbuffer CB : register(b0) {
     float  gravity;        // dye-weighted gravity, sim texels/s^2 (+y = down, 0 = off)
     float  gravityPow;     // rho^p, so thin veils hang and dense cores fall
     float  gravityBlur;    // sim texels: blur radius of the density gravity reads
-    float  pad0_;
+    float  dyeRise;        // uv/s, dye advection only: the ink rides up with the picture (0 = off)
 };
 
 SamplerState linearClamp : register(s0);
@@ -211,6 +211,27 @@ void CSAdvectDye(uint3 id : SV_DispatchThreadID) {
     float2 uv = (float2(id.xy) + 0.5) / float2(dims);
     float2 vel = SrcA.SampleLevel(linearClamp, uv, 0).xy;
     float2 coord = uv - dt * vel * texelSize;   // texelSize = sim texel, like reference
+    // [drops] ink_rise (2026-11-21 ag-ink): a uniform upward drift of the DYE
+    // alone (no velocity, so nothing riding the flow is pushed): the ink keeps
+    // pace with the rising picture instead of sliding out under the film.
+    if (dyeRise != 0.0) coord.y += dt * dyeRise;
+    // [drops] ink_swirl (2026-11-22): the dye's OWN current, so a drop can curl into smoke without a
+    // velocity impulse that would push everything else that rides the flow. In this pass gravityPow < 0
+    // is the flag and -gravityPow the speed (uv-y / s), value the clock (see the CPU side). A stream
+    // function of five slow plane waves; the current is its curl, so it is divergence-free: ink is
+    // stirred, never piled up or thinned.
+    if (gravityPow < 0.0) {
+        const float2 KW[5] = { float2(5.1, 3.3), float2(-7.9, 6.2), float2(11.3, -13.7), float2(-19.1, -9.4), float2(27.5, 21.9) };
+        const float  WW[5] = { 0.050, 0.071, 0.113, 0.157, 0.211 };
+        float2 pw = float2(uv.x * aspect, uv.y);
+        float2 sw = float2(0.0, 0.0);
+        for (int n = 0; n < 5; n++) {
+            float a = cos(dot(KW[n], pw) + WW[n] * value + 1.7 * n) / (1.0 + 0.55 * n);
+            sw += float2(KW[n].y, -KW[n].x) * a;
+        }
+        sw *= -gravityPow / 12.0;
+        coord -= dt * float2(sw.x / max(aspect, 1e-3), sw.y);
+    }
     float4 c = SrcB.SampleLevel(linearClamp, coord, 0);
 
     float lum = max(c.r, max(c.g, c.b));
@@ -512,6 +533,37 @@ float2 MirrorFold(float2 uv, out float seam) {
         c = clamp(c, 0.2, 0.8);
     }
     const float soft = max(mrP2.x, 0.0);
+
+    if (mode >= 5) {
+        // ---- the LOW CAMERA / FISH-EYE (MirrorConfig, mode 5) -------------
+        // The screen is an equidistant fish-eye: the angle off the lens axis
+        // grows with the distance from the screen centre, cam_fov across the
+        // diagonal. The camera stands cam_height above the surface at `c`,
+        // pitched cam_pitch below the horizon, looking "up the screen". Each
+        // pixel's ray is cut with the surface and the look is drawn there.
+        // seam carries the brightness instead of a fold distance: 0 above the
+        // horizon, a ramp over the last cam_fade of sin(elevation) below it
+        // (the far surface is minified without mips; the fade is what hides
+        // that), 1 everywhere nearer. Slots: see BuildMirrorConstants.
+        const float aspect = max(mrP0.z, 1e-3);
+        const float fov    = radians(clamp(mrP0.y, 20.0, 179.0));
+        const float pitch  = radians(clamp(mrP1.z, 3.0, 90.0));
+        const float hgt    = max(mrP1.w, 0.01);
+        float2 s  = float2((uv.x - 0.5) * 2.0 * aspect, (0.5 - uv.y) * 2.0);   // y up, half-height = 1
+        float  r  = length(s);
+        float  th = r / length(float2(aspect, 1.0)) * fov * 0.5;
+        float2 e  = (r > 1e-6) ? s / r : float2(0.0, 0.0);
+        float  st = sin(th), ct = cos(th);
+        float  sp = sin(pitch), cp = cos(pitch);
+        // world: x right, y away from the camera, z up; forward = (0, cp, -sp), up = (0, sp, cp)
+        float3 d  = float3(st * e.x, st * e.y * sp + ct * cp, st * e.y * cp - ct * sp);
+        if (d.z > -1e-4) { seam = 0.0; return float2(0.5, 0.5); }             // above the horizon: black
+        float  t  = hgt / -d.z;
+        seam = saturate(-d.z / max(soft, 1e-3));
+        seam = seam * seam * (3.0 - 2.0 * seam);
+        float2 q  = float2(c.x + d.x * t / aspect, c.y - d.y * t);
+        return 1.0 - abs(frac(q * 0.5) * 2.0 - 1.0);                          // past the edge: mirrored copies
+    }
 
     if (mode >= 4) {
         // Kaleidoscope: N wedges about c, every other one REFLECTED, so each
@@ -1910,6 +1962,14 @@ float DropHoleSum(float2 q, float aspect, out float dep, out float rad) {
                 float dqz = floor(D.w * 0.25);
                 float dwr = D.w - 4.0 * dqz;
                 if (dwr > 1.5 || dwr <= 0.002) continue;     // rings keep their own film
+                // droplet_big_frac: a MEDIUM droplet (dq + 256) is registered in
+                // every cell its support covers; count it once, in the walked
+                // cell nearest its home
+                [branch] if (dqz > 255.5) {
+                    dqz -= 256.0;
+                    if (xx != clamp(clamp((int)floor(D.x * gw), 0, gw - 1), cx - 1, cx + 1)
+                     || yy != clamp(clamp((int)floor(D.y * gh), 0, gh - 1), cy - 1, cy + 1)) continue;
+                }
                 float R  = -D.z;
                 float ds = R * LA_DROP_SUPPORT;
                 float2 dq = q - float2(D.x * aspect, D.y);
@@ -1925,6 +1985,117 @@ float DropHoleSum(float2 q, float aspect, out float dep, out float rad) {
     return sum;
 }
 #endif
+)hlsl"
+// (split: MSVC caps a single string literal at 16380 bytes)
+R"hlsl(
+#ifdef LIQUID_ACID
+// ---- the fish-eye camera's RELIEF ([mirror] mode 5, cam_relief > 0) --------
+// The user on the first fish-eye, which cut each ray with a flat plane: "why
+// does the fisheye look like its flat. Isnt it supposed to have [volume]? and
+// depth? its 3d no?". So the droplets get the shape their shading always
+// claimed: every solid droplet is a DOME over its drawn disc (an ellipsoid,
+// cam_relief x its radius high). The ray walks down through the thin slab the
+// domes live in; the first dome it enters is what the pixel shows (the look is
+// drawn at that point of the surface, so a bead keeps its own colour and rim),
+// which is what lets a near bead stand up and hide what is behind it. A glint
+// off the dome's own normal goes out through `spec`. Rings stay flat.
+// Cost: a 3x3 cell walk of the droplet table per step, at most 30 steps on a
+// grazing ray, a handful on a steep one. Display-only; nothing in the sim.
+float CamDomeAt(float2 f, float aspect, float k, out float2 cen, out float rad) {
+    cen = float2(0.0, 0.0); rad = 0.0;
+    float best = 0.0;
+    const int gw = (int)LA_DROP_GRID_W, gh = (int)LA_DROP_GRID_H;
+    int cx = clamp((int)floor(f.x * gw), 0, gw - 1), cy = clamp((int)floor(f.y * gh), 0, gh - 1);
+    float2 q = float2(f.x * aspect, f.y);
+    for (int oy = -1; oy <= 1; oy++) {
+        int yy = cy + oy;
+        if (yy < 0 || yy >= gh) continue;
+        for (int ox = -1; ox <= 1; ox++) {
+            int xx = cx + ox;
+            if (xx < 0 || xx >= gw) continue;
+            uint2 cell = DropCells[yy * gw + xx];
+            [loop]
+            for (uint di = 0; di < cell.y; di++) {
+                float4 D = AcidDrops[cell.x + di];
+                float dqz = floor(D.w * 0.25);
+                float dwr = D.w - 4.0 * dqz;
+                if (dwr > 1.5 || dwr <= 0.002) continue;     // a ring stays flat; under its gate a droplet is not there
+                float  R  = abs(D.z);
+                float2 c  = float2(D.x * aspect, D.y);
+                float2 dq = q - c;
+                float  dd2 = dot(dq, dq);
+                if (dd2 >= R * R) continue;
+                float  h  = k * saturate(dwr) * sqrt(R * R - dd2);
+                if (h > best) { best = h; cen = c; rad = R; }
+            }
+        }
+    }
+    return best;
+}
+float2 CamFold(float2 q) { return 1.0 - abs(frac(q * 0.5) * 2.0 - 1.0); }
+float2 CamRelief(float2 suv, float2 uvFlat, inout float spec) {
+    const float k = mrP2.y;
+    const float aspect = max(mrP0.z, 1e-3);
+    // the same ray as MirrorFold's mode 5 (keep the two in step)
+    const float fov   = radians(clamp(mrP0.y, 20.0, 179.0));
+    const float pitch = radians(clamp(mrP1.z, 3.0, 90.0));
+    const float hgt   = max(mrP1.w, 0.01);
+    float2 s  = float2((suv.x - 0.5) * 2.0 * aspect, (0.5 - suv.y) * 2.0);
+    float  r  = length(s);
+    float  th = r / length(float2(aspect, 1.0)) * fov * 0.5;
+    float2 e  = (r > 1e-6) ? s / r : float2(0.0, 0.0);
+    float  st = sin(th), ct = cos(th), sp = sin(pitch), cp = cos(pitch);
+    float3 d  = float3(st * e.x, st * e.y * sp + ct * cp, st * e.y * cp - ct * sp);
+    float2 res = uvFlat;
+    if (d.z > -1e-4) return res;
+    const float zTop = min(k * 0.085, hgt * 0.9);          // no dome is taller than one of radius 0.085
+    const float tEnd = hgt / -d.z;
+    const float hxy  = max(length(d.xy), 1e-4);
+    float t = (hgt - zTop) / -d.z, tPrev = t;
+    bool  hit = false;
+    float2 cen = float2(0.0, 0.0);
+    float rad = 0.0;
+    [loop]
+    for (int n = 0; n < 30; n++) {
+        float  z = max(hgt + d.z * t, 0.0);
+        float2 q = float2(mrP1.x + d.x * t / aspect, mrP1.y - d.y * t);
+        if (CamDomeAt(CamFold(q), aspect, k, cen, rad) > z) { hit = true; break; }
+        if (t >= tEnd) break;
+        tPrev = t;
+        // only a dome of radius >= z / k reaches this height: half that radius is a safe stride
+        t = min(t + max(0.5 * z / k, 0.002) / hxy, tEnd);
+    }
+    if (hit) {
+        float a = tPrev, b = t;                             // a outside, b inside: back to the dome's skin
+        [loop]
+        for (int j = 0; j < 5; j++) {
+            float  m  = 0.5 * (a + b);
+            float2 qm = float2(mrP1.x + d.x * m / aspect, mrP1.y - d.y * m);
+            float2 c2; float r2;
+            if (CamDomeAt(CamFold(qm), aspect, k, c2, r2) > max(hgt + d.z * m, 0.0)) b = m; else a = m;
+        }
+        float2 qh = float2(mrP1.x + d.x * b / aspect, mrP1.y - d.y * b);
+        res = CamFold(qh);
+        float  hh = CamDomeAt(res, aspect, k, cen, rad);
+        // the glint: Blinn-Phong off the dome's normal, in surface coordinates (x right, y down the
+        // tank, z up); a mirrored tile flips the axis it folded. One lamp, high on the upper left.
+        float2 mm  = frac(qh * 0.5) * 2.0;
+        float2 sg  = float2(mm.x < 1.0 ? 1.0 : -1.0, mm.y < 1.0 ? 1.0 : -1.0);
+        float2 off = (float2(res.x * aspect, res.y) - cen) * sg;
+        float3 nrm = normalize(float3(off, max(hh, 1e-5) / max(k * k, 1e-3)));
+        float3 V   = normalize(float3(-d.x, d.y, -d.z));
+        float3 L   = normalize(float3(-0.45, -0.55, 0.70));
+        float  nh  = saturate(dot(nrm, normalize(L + V)));
+        // ...scaled by the bead's size ON SCREEN (its radius over its distance): a far bead is a few pixels
+        // and a glint on each one turned the far field into glitter (the first v2 frame)
+        spec = pow(nh, 90.0) * 0.9 * saturate(rad / 0.004) * smoothstep(0.0015, 0.010, rad / max(b, 1e-3));
+    }
+    return res;
+}
+#endif
+)hlsl"
+// (split: MSVC caps a single string literal at 16380 bytes)
+R"hlsl(
 
 #if defined(LIQUID_ACID) && defined(OIL_HEIGHT) && defined(OIL_SURFACE)
 // The surface PRE-PASS is this same PSMain compiled with OIL_SURFACE: it stops
@@ -1939,6 +2110,11 @@ float4 PSMain(VSOut i) : SV_Target {
     // the one-pixel fwidth() spike exactly on a seam.
     float mirrorSeam;
     float2 uv = MirrorFold(i.uv, mirrorSeam);
+    float camSpec = 0.0;               // the fish-eye camera's relief glint (mode 5 + cam_relief only)
+#ifdef LIQUID_ACID
+    [branch] if (mrP0.x > 4.5 && mrP2.y > 0.001 && mirrorSeam > 0.0 && LA_DROPS_ON > 0.5)
+        uv = CamRelief(i.uv, uv, camSpec);
+#endif
     // The [post] camera pass reads this pixel's CIRCLE OF CONFUSION out of the
     // render target's ALPHA (px at 1440p). Only the acid look can produce one
     // -- it is the only look with an isoline and a per-droplet depth -- so
@@ -2143,6 +2319,7 @@ R"hlsl(
     // the walk (dlRv, dlRho below)
     float2 dlQ = float2(2.0, 0.0);
     float  dlR = 0.0, dlK = 0.0, dlD2 = 0.0, dlS2 = 1.0, dlN = 0.0;
+    float  dlB = 0.0;     // 1 = that hole is a MEDIUM droplet (droplet_big_frac)
 #endif
     if (LA_DROPS_ON > 0.5) {
         const int gw = (int)LA_DROP_GRID_W, gh = (int)LA_DROP_GRID_H;
@@ -2183,6 +2360,9 @@ R"hlsl(
                     float  dwf  = D.w;
                     float  dqz  = floor(dwf * 0.25);
                     float  dwr  = dwf - 4.0 * dqz;
+                    // droplet_big_frac: dq + 256 = a MEDIUM solid droplet
+                    float  dbg  = 0.0;
+                    [branch] if (dqz > 255.5) { dqz -= 256.0; dbg = 1.0; }
                     float  rng  = (dwr > 1.5) ? 1.0 : 0.0;
                     float  gate = dwr - 2.0 * rng;
                     float  ddep = (dqz > 0.5) ? (dqz - 1.0) * (1.0 / 254.0) : 0.5;
@@ -2361,6 +2541,15 @@ R"hlsl(
 )hlsl"
 // (split: MSVC caps a single string literal at 16380 bytes)
 R"hlsl(
+                    // droplet_big_frac: a MEDIUM droplet is registered in every
+                    // cell its support covers (buildGrid's spread), so the 3x3
+                    // walk meets it up to nine times and the punch stepped at
+                    // every cell border (the square knobs on the first try).
+                    // Counted once: in the walked cell nearest its home.
+                    [branch] if (dbg > 0.5) {
+                        if (xx != clamp(clamp((int)floor(D.x * gw), 0, gw - 1), cx - 1, cx + 1)
+                         || yy != clamp(clamp((int)floor(D.y * gh), 0, gh - 1), cy - 1, cy + 1)) continue;
+                    }
                     // DIFFRACTION by the droplet's own size: a 3-px dot
                     // cannot punch the film fully black, so it comes out a
                     // soft grey spot instead of a hard hole. Carried on the
@@ -2405,7 +2594,7 @@ R"hlsl(
                     dg = (-6.0 * du2 / ds2) * gK * gS;
                     [branch] if (D.z < 0.0) {
                         float2 qn = dq / max(R, 1e-6);   // the shaped offset, in kernel radii
-                        if (dot(qn, qn) < dot(dlQ, dlQ)) { dlQ = qn; dlR = R; dlK = gS; dlD2 = dd2; dlS2 = ds2; }
+                        if (dot(qn, qn) < dot(dlQ, dlQ)) { dlQ = qn; dlR = R; dlK = gS; dlD2 = dd2; dlS2 = ds2; dlB = dbg; }
                     }
 #endif
                     if (D.z < 0.0) { dNeg += dw; gNeg += dg; }
@@ -2918,6 +3107,8 @@ R"hlsl(
     // Liquid Acid: restyle the parity colour C as INK, then composite OIL.
     // =====================================================================
     float3 inkC;
+    float3 inkSmoke  = 0.0;     // [ink] black_only: the ink's own light, held
+    float  inkSmokeM = 0.0;     // back for the black masses (composite below)
     if (LA_INK_WATER > 0.5) {
         // ---- ink_mode=water: the SHARED ink-in-water block ---------------
         // Reads the RAW dye (C0), so it bypasses the parity CSS chain exactly
@@ -2926,6 +3117,16 @@ R"hlsl(
         float inkM;
         inkC = InkWater(C0, uv, texelSize, i.pos.xy, inkM);
         m = inkM;
+        // [ink] black_only (ikP6.z, 2026-11-21 ag-ink): the ink is lifted OUT
+        // of inkC here and added back at the composite, in the black masses
+        // only. Everything in between (the film's transparency, thin edge,
+        // mass dye, swarms) sees dye-free water, so the film is today's.
+        [branch] if (ikP6.z > 0.5) {
+            inkSmoke  = inkC - ikPaper.rgb;
+            inkSmokeM = inkM;
+            inkC = ikPaper.rgb;
+            m = 0.0;
+        }
     } else {
     // ---- INK: flat colour bands, dark seams, duotone ramp ----------------
     float inkLum = max(C.r, max(C.g, C.b));
@@ -3051,6 +3252,34 @@ R"hlsl(
             float  ss = SEAM_STRETCH * 0.25;
             float  ks = min(exp(min(ss * max(wn - 0.01, 0.0) / 0.04, 4.0)), max(6.0, 2.0 * ss));
             k2b = smoothstep(MIXSEAM - hw * ks, MIXSEAM + hw * ks, mixV);
+        }
+#endif
+#ifdef SEAM_LEAK
+        // film_hue2_leak (user 2026-11-19: "a colored thing, and then a leak at
+        // the edge, that could go like idk a third of the screen", with a graph
+        // of 1 / x): in place of the stretch. The seam is the band of before
+        // times SEAM_LEAK_C / 4, and the patch's colour leaks out of the edge
+        // where that band reaches the patch (kc = 1): SEAM_LEAK / 20 of the hue
+        // there, fading as (1 - d / reach)^3 with d in units of the FIELD, so
+        // the leak is short where the field is steep and long where it is
+        // shallow, and no gradient is taken. The two are joined as
+        // 1 - (1 - a)(1 - b): no crease where the leak takes over.
+        {
+            float cwL = 0.06 * LA_HUE2_SEAM * (SEAM_LEAK_C * 0.25);
+            float kcL = smoothstep(MIXSEAM - cwL, MIXSEAM + cwL, mixV);
+            float tL  = saturate((MIXSEAM + cwL - mixV) / (SEAM_LEAK_R * 0.05));
+            float qL  = 1.0 - tL;
+            float klL = min((SEAM_LEAK * 0.05) * qL * qL * qL, 1.0);
+#ifdef SEAM_LEAK_I
+            // film_hue2_leak_in: the same leak the other way, the film's colour
+            // into the patch from the band's film-side edge (kc = 0), so a
+            // shallow valley inside a patch shows the in-between colour.
+            float qI  = 1.0 - saturate((mixV - (MIXSEAM - cwL)) / (SEAM_LEAK_R * 0.05));
+            float kiL = min((SEAM_LEAK_I * 0.05) * qI * qI * qI, 1.0);
+            k2b = kcL * (1.0 - kiL) + (1.0 - kcL) * klL;
+#else
+            k2b = 1.0 - (1.0 - kcL) * (1.0 - klL);
+#endif
         }
 #endif
         float k2 = k2b * saturate(LA_HUE2_AMT);
@@ -3858,6 +4087,13 @@ R"hlsl(
         }
     }
 #endif
+#ifdef DROP_LIFE
+    // droplet_big_frac: a MEDIUM droplet is BLACK OIL, as solid as a mass: no
+    // dye, no film through it. Only the ink side, so the composite's own alpha
+    // still draws the edge, and the rim, meniscus and glint below paint over
+    // it exactly as they do on a small droplet.
+    [branch] if (dlB > 0.5) inkC *= smoothstep(1.0, 1.12, dlRho);
+#endif
 #ifdef OIL_LAMP
     {
         float txM = lerp(1.0, 0.93 + 0.14 * AcidFbm(pp * 7.0 + float2(LA_TIME * 0.010,
@@ -3880,6 +4116,7 @@ R"hlsl(
                  + length(Dye.SampleLevel(linearClamp, uv - bt, 0).rgb)
                  + length(Dye.SampleLevel(linearClamp, uv + float2(bt.x, -bt.y), 0).rgb)
                  + length(Dye.SampleLevel(linearClamp, uv - float2(bt.x, -bt.y), 0).rgb);
+        if (ikP6.z > 0.5) lw = 0.0;     // [ink] black_only: the film sees no ink
         oilC *= lerp(1.0, 0.88 + 0.30 * saturate(lw * 0.45 * LA_INK_GAIN), saturate(LA_TRANSLUCENCY));
 #ifdef OIL_LAMP
         oilW *= lerp(1.0, 0.88 + 0.30 * saturate(lw * 0.45 * LA_INK_GAIN), saturate(LA_TRANSLUCENCY));
@@ -4075,6 +4312,7 @@ R"hlsl(
         float2 uvO = saturate(uv - (grad / gl) * (max(LA_MENISCUS_W, LA_RIM_WIDTH) * 8.0)
                                   * float2(1.0 / aspect, 1.0));
         float3 dO  = Dye.SampleLevel(linearClamp, uvO, 0).rgb;
+        if (ikP6.z > 0.5) dO = 0.0;     // [ink] black_only: no ink-made halo
         float  il  = saturate(max(dO.r, max(dO.g, dO.b)) * max(LA_INK_GAIN, 1.0));
         // Brightens where the ink outside is bright, and falls toward a floor
         // -- not to nothing -- over clear water, because the halo is also the
@@ -4107,6 +4345,7 @@ R"hlsl(
         float2 uvO = saturate(uv - (grad / gl) * (0.06 * lensR + LA_MENISCUS_W * 2.0)
                                   * float2(1.0 / aspect, 1.0));
         float3 dO  = Dye.SampleLevel(linearClamp, uvO, 0).rgb;
+        if (ikP6.z > 0.5) dO = 0.0;     // [ink] black_only: no ink-made halo
         float  ilo = saturate(max(dO.r, max(dO.g, dO.b)) * max(LA_INK_GAIN, 1.0));
         haloInk    = lerp(1.0, smoothstep(0.03, 0.40, ilo), k);
         float3 hs = AcidRgb2Hsv(inkC);     // lift: more saturated, brighter
@@ -4255,6 +4494,38 @@ R"hlsl(
 #endif
     }
 #endif
+    // ---- [ink] black_only: INK INSIDE THE BLACK OIL (2026-11-21 ag-ink) ---
+    // The ink held back above comes in HERE, and only where the picture is a
+    // black MASS: (1 - alpha) keeps it off the film, and the blob-only field
+    // (fieldB below the isoline, eased over 3 px like the mass dye's mK) keeps
+    // it out of the droplet holes. Added in both tracks alike, so the output
+    // cap's ratio is untouched. film_colour (ikP6.w) swaps the ink's pale
+    // tint for the FILM's own colour at this spot (oilC: the colour the film
+    // would have here, hue and chroma, normalised to its peak), at the same
+    // level: the colour on screen bleeding into the black as smoke.
+    [branch] if (ikP6.z > 0.5) {
+        float sBk = (fieldB - thresh) / max(length(gradB), 1e-6);
+        float wk  = (1.0 - alpha) * (1.0 - smoothstep(-3.0 * PX1440, 0.0, sBk));
+        float3 sm = inkSmoke;
+        [branch] if (ikP6.w > 0.0005) {
+            float  fx = max(oilC.r, max(oilC.g, oilC.b));
+            float3 fc = (fx > 1e-4) ? max(oilC, 0.0) / fx : float3(1.0, 1.0, 1.0);
+            // a fifth of the way to white: at full film chroma a blue film's
+            // smoke had a quarter of the pale ink's luminance and vanished
+            // into the black (ag-ink r1 frames). Round 3: only for THIN ink.
+            // Dense ink is bright enough and the white turned it into a
+            // washed-out lavender marble (the grey the user named): from a
+            // level of 0.15 up the mix goes, at 0.55 it is the film's colour.
+            float  sl = max(sm.r, max(sm.g, sm.b));
+            fc = lerp(fc, float3(1.0, 1.0, 1.0), 0.2 * (1.0 - smoothstep(0.15, 0.55, sl)));
+            sm = lerp(sm, fc * sl, saturate(ikP6.w));
+        }
+        col += sm * wk;
+#ifdef OIL_LAMP
+        wtCol += sm * wk;
+#endif
+        m = max(m, inkSmokeM * wk);
+    }
 #if defined(OIL_STAGETAP) && (OIL_STAGETAP == 4 || OIL_STAGETAP == 104)
     return OilTapLin((OIL_STAGETAP > 100) ? OIL_TAPW(col, wtCol) : col);
 #endif
@@ -4676,7 +4947,7 @@ R"hlsl(
     // film_level x 0.6; (2) late, after the halo: the rim (see below).
     // Specks stay solid dark (the lens opens between a 3- and a 14-px radius);
     // solid holes only, so neither the film nor a mass is lifted.
-    [branch] if (laDrop[2].x > 0.0005 && dlRho < 1.0 && sdf < 0.0) {
+    [branch] if (laDrop[2].x > 0.0005 && dlRho < 1.0 && sdf < 0.0 && dlB < 0.5) {   // (a MEDIUM droplet stays black)
         float  szK = smoothstep(laDrop[2].y, laDrop[2].z, dlRv);
         float2 un  = dlQ / max(length(dlQ), 1e-6);
         float  rc  = length(un * dlRho - 0.12 * laDrop[1].xy);
@@ -5623,6 +5894,7 @@ R"hlsl(
             }
             lin *= min(o, ikP6.y) / v;
         }
+        if (mrP0.x > 4.5) lin = (lin + camSpec) * saturate(mirrorSeam);   // the fish-eye camera: relief glint + horizon fade (mode 5 only)
         return float4(lin, outCoc);
     }
 #endif
@@ -5697,6 +5969,7 @@ R"hlsl(
 #if defined(OIL_STAGETAP) && (OIL_STAGETAP == 14 || OIL_STAGETAP == 15 || OIL_STAGETAP == 99 || OIL_STAGETAP >= 114)
     return OilTapRaw(lin * sdrScale * gain);
 #endif
+    if (mrP0.x > 4.5) lin = (lin + camSpec) * saturate(mirrorSeam);   // the fish-eye camera: relief glint + horizon fade (mode 5 only)
     return float4(lin * sdrScale * gain, outCoc);
 }
 )hlsl";

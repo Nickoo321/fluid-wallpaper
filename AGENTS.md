@@ -8,7 +8,8 @@ picture. [HOW-TO-PUSH.md](HOW-TO-PUSH.md) says how to send a change back.
 
 A live wallpaper for Windows 10 and 11: one exe, C++20, Direct3D 12, nothing to install beside it. It draws into a
 window that sits behind the desktop icons, has a tray icon, and pauses while a fullscreen program covers the desktop.
-The only third-party code is Dear ImGui, compiled in, used by the Settings window alone.
+The only third-party code is Dear ImGui, compiled in, used by the Settings window alone; that window's typeface,
+Schibsted Grotesk (SIL Open Font License), is compiled in too.
 
 What a fresh install shows is the **oil look** (called `liquid_acid` in the code): black oil, as big masses and
 small droplets, floating on a lit coloured film. About every ten minutes the **look cycle** moves to another colour
@@ -83,7 +84,7 @@ The three biggest files are far too large to read whole. Search them for a key n
 | `src/cycle.cpp`, `cycle.h`, `animators.h` | 130 KB | The look cycle: the stage list, the draw of the next stage, the fade through black. |
 | `src/clocks.cpp` | 55 KB | Slow random drift of chosen settings around their preset value (`[clocks]`). |
 | `src/photo.cpp`, `journey.cpp`, `analyzer.cpp` | | A photo stage for the cycle, an older colour journey, the HDR analyzer window. |
-| `src/ui/` | | The Settings window: `keys.inc` is one row per setting; `ui_model` (the table and the one write path), `ui_window` (drawing), `ui_cycle` (the cycle pane's adapter), `ui_presets` (the preset list). |
+| `src/ui/` | | The Settings window: `ui_home` (the Home, All looks, Display and system and Add a pair screens); behind Advanced the earlier window: `keys.inc` is one row per setting; `ui_model` (the table and the one write path), `ui_window` (drawing), `ui_cycle` (the cycle pane's adapter), `ui_presets` (the preset list). `fonts/` holds the typeface and its OFL.txt. |
 | `src/third_party/imgui/` | | Dear ImGui, unchanged. Do not edit. |
 | `src_oil/`, `src_acid/`, `src_ink3d/` | | Three small stand-alone experiments with their own exes. Not part of the wallpaper. |
 | `tools/installer/` | | The installer and updater scripts, and `data/`: the settings, looks and presets a fresh install starts with. |
@@ -122,7 +123,9 @@ those files. The comment text itself is the documentation, and it is usually det
   `Scheme - *.ini` files are the colour schemes the cycle walks. An installed copy has the same files in
   `%APPDATA%\FluidWallpaper`.
 - The colour director is switched by `[liquid_acid] colour_director` and tuned by the `director_*` keys. The ratings
-  of its colour pairs are in `[looks]` (the Settings window, Cycle pane).
+  of its colour pairs are in `[looks]` (the Settings window: Home and All looks).
+- `Ink - inverted.ini` and `WE parity (fluid).ini` beside the schemes are the start presets of Home's 30-minute visits
+  to Ink and Fluid (`src/cycle.cpp`, `CycleGuestPreset`, looks for them beside the cycle's own files).
 
 ## Recipe: add a setting
 
@@ -135,7 +138,7 @@ Follow an existing one. `droplet_ring_clump` is a good model: search for it and 
    `a.dropletRingClump = getF(S, L"droplet_ring_clump", a.dropletRingClump);`
 3. **`src/main.cpp`, `WriteConfigKeys`**: write it.
    `putF(S, L"droplet_ring_clump", a.dropletRingClump, 3);`
-4. **`src/ui/keys.inc`**: one `KEY_SLIDER` or `KEY_CHECK` row, so it shows in the Settings window. The header of
+4. **`src/ui/keys.inc`**: one `KEY_SLIDER` or `KEY_CHECK` row, so it shows in the Settings window (under Advanced). The header of
    that file explains every column. Give the slider the range that is useful, not the range that is possible.
 5. **Use it.** On the CPU side that is ordinary code in `src/fluid.cpp`. In a shader, see the next recipe.
 

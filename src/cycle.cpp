@@ -131,6 +131,12 @@ bool  s_quiet = false;
 long  s_statTier[3] = {};
 long  s_statDraws = 0, s_statBurst = 0, s_statRedraw = 0;
 std::vector<long> s_statStage;
+// ui3 (2026-11-23) the GUEST visit (CycleVisitGuest): a guest stage is in the list (always its last entry), the stage
+// on screen when the visit started (fixed order goes on after it), and the colour director's pair before the visit
+// (queued once the director runs again; -1 = none). All false / -1 while no guest visit was ever started.
+bool  s_guestLive = false;
+int   s_guestFrom = -1;
+int   s_guestPair = -1, s_guestMode = 0;
 
 void Log(const char* fmt, ...) {
     char buf[1024];
@@ -311,6 +317,12 @@ bool IsPhoto(int i) { return Valid(i) && s_cfg.stages[i].photo; }     // brief B
 bool IsFluid(int i) { return Valid(i) && !s_cfg.stages[i].overlay && s_cfg.stages[i].look == CYCLE_LOOK_FLUID; }
 // an oil or ink LOOK stage (the "other" side of the WE alternation)
 bool IsOtherLook(int i) { return Valid(i) && !s_cfg.stages[i].overlay && s_cfg.stages[i].look != CYCLE_LOOK_FLUID; }
+// a RATED look stage (stage_N_rating; cycle.h): drawn by its rating at the dwell end, never by tier / weight
+bool IsRated(int i) {
+    return Valid(i) && !s_cfg.stages[i].rateKey.empty() && !s_cfg.stages[i].overlay && !s_cfg.stages[i].photo;
+}
+// ui3: the guest stage of a visit to Ink / Fluid (cycle.h CycleVisitGuest); never drawn, never persisted
+bool IsGuest(int i) { return i >= 0 && i < (int)s_cfg.stages.size() && s_cfg.stages[i].guest; }
 bool TierMode() {
     for (auto& s : s_cfg.stages) if (s.tier >= 0) return true;
     return false;
@@ -348,10 +360,11 @@ bool PhotoEmpty(int j) {
 // Valid, not the stage being fallen back from, and (a photo stage) not empty.
 bool Drawable(int j) {
     if (!Valid(j) || j == s_excludeStage) return false;
+    if (s_cfg.stages[j].guest) return false;      // ui3: a guest stage is never drawn (only CycleVisitGuest goes there)
     return !(s_cfg.stages[j].photo && PhotoEmpty(j));
 }
 // pre-flight 4: never an overlay over a photo
-bool OverlayBlocked(int j) { return IsOverlay(j) && IsPhoto(LookStage(s_cur)); }
+bool OverlayBlocked(int j) { return IsOverlay(j) && (IsPhoto(LookStage(s_cur)) || IsGuest(s_cur)); }   // ui3: nor over a guest
 
 float DwellOf(int i) {
     float v = s_dwellOverride > 0.0f ? s_dwellOverride
@@ -368,6 +381,9 @@ float FadeOutOf(int i) {
         const float v = Valid(s_softStage) ? s_cfg.stages[s_softStage].fadeOutSec : -1.0f;
         return v >= 0.0f ? v : kSoftFadeOut;
     }
+    // LEAVING a rated look stage for a plain one: the rated stage's own fade (its fades apply both ways)
+    if (IsRated(s_cur) && i != s_cur && !IsRated(i) && s_cfg.stages[s_cur].fadeOutSec >= 0.0f)
+        return s_cfg.stages[s_cur].fadeOutSec;
     if (!Valid(i)) return s_cfg.fadeOutSec;
     const CycleStage& st = s_cfg.stages[i];
     if (st.transition == CYCLE_TR_CUT) return 0.0f;
@@ -378,6 +394,10 @@ float FadeInOf(int i) {
         const float v = Valid(s_softStage) ? s_cfg.stages[s_softStage].fadeInSec : -1.0f;
         return v >= 0.0f ? v : kSoftFadeIn;
     }
+    // ...and the fade back in on the plain stage that follows a rated one
+    if (i == s_cur && !IsRated(i) && s_fromAtBlack != i && IsRated(s_fromAtBlack) &&
+        s_cfg.stages[s_fromAtBlack].fadeInSec >= 0.0f)
+        return s_cfg.stages[s_fromAtBlack].fadeInSec;
     if (!Valid(i)) return s_cfg.fadeInSec;
     const CycleStage& st = s_cfg.stages[i];
     if (st.transition == CYCLE_TR_CUT) return 0.0f;
@@ -557,6 +577,7 @@ void CaptureUserShell() {
 
 void PersistCurrent() {
     if (g_configReadOnly || !g_iniPath[0] || s_cur < 0) return;
+    if (IsGuest(s_cur)) return;               // ui3: current= never names a guest (it keeps the stage before the visit)
     if (_wcsicmp(s_iniPath.c_str(), g_iniPath) != 0) return;
     wchar_t v[16];
     swprintf_s(v, L"%d", s_cur + 1);
@@ -567,6 +588,7 @@ void PersistCurrent() {
 // neither counts nor resets; a WE stage resets).
 void NoteEntered(int from, int to) {
     if (s_noCount) return;
+    if (IsGuest(to)) return;                  // ui3: a guest visit is outside the WE alternation's count
     if (IsFluid(to)) s_otherRun = 0;
     else if (IsOtherLook(to) && from != to) s_otherRun++;
 }
@@ -732,7 +754,7 @@ int DrawTiered(bool allowBurst, bool allowOverlays, const char* why, int exclude
     std::vector<int> mem[3];
     float tot[3] = {};
     for (int j = 0; j < n; j++) {
-        if (IsFluid(j) || !Drawable(j)) continue;   // brief BY: empty photo stages out, before NextUnit
+        if (IsFluid(j) || !Drawable(j) || IsRated(j)) continue;   // brief BY: empty photo stages out, before NextUnit
         // we_every chain: never the running stage (or its file) again
         if (Valid(exclude) && (j == exclude ||
             _wcsicmp(s_cfg.stages[j].path.c_str(), s_cfg.stages[exclude].path.c_str()) == 0)) continue;
@@ -798,9 +820,9 @@ int DrawFluid() {
     const std::wstring curPath = Valid(s_cur) ? s_cfg.stages[s_cur].path : L"";
     std::vector<int> c;
     for (int j = 0; j < n; j++)
-        if (IsFluid(j) && (j != s_cur) && _wcsicmp(s_cfg.stages[j].path.c_str(), curPath.c_str()) != 0)
+        if (IsFluid(j) && !IsGuest(j) && (j != s_cur) && _wcsicmp(s_cfg.stages[j].path.c_str(), curPath.c_str()) != 0)
             c.push_back(j);
-    if (c.empty()) for (int j = 0; j < n; j++) if (IsFluid(j) && j != s_cur) c.push_back(j);
+    if (c.empty()) for (int j = 0; j < n; j++) if (IsFluid(j) && !IsGuest(j) && j != s_cur) c.push_back(j);
     if (c.empty()) return -1;
     float total = 0.0f;
     for (int j : c) total += fmaxf(s_cfg.stages[j].weight, 0.0f);
@@ -829,7 +851,7 @@ int TakeQueued(bool allowOverlay) {
 // Tier mode, alternate_random: WE alternates with everything else.
 int PickTier() {
     bool haveFluid = false;
-    for (int j = 0; j < (int)s_cfg.stages.size(); j++) if (IsFluid(j)) { haveFluid = true; break; }
+    for (int j = 0; j < (int)s_cfg.stages.size(); j++) if (IsFluid(j) && !IsGuest(j)) { haveFluid = true; break; }
     if (!Valid(s_cur)) {                     // boot / turned on: never an overlay first
         const int q = TakeQueued(false);
         return q >= 0 ? q : DrawTiered(false, false, "start");
@@ -844,7 +866,7 @@ int PickTier() {
         return DrawFluid();
     }
     if (IsFluid(s_cur) || !haveFluid) {
-        const bool ovOk = !IsPhoto(s_cur);   // pre-flight 4: never an overlay over a photo
+        const bool ovOk = !IsPhoto(s_cur) && !IsGuest(s_cur);   // pre-flight 4: never an overlay over a photo (ui3: or a guest)
         const int q = TakeQueued(ovOk);
         return q >= 0 ? q : DrawTiered(false, ovOk, "after WE");
     }
@@ -878,13 +900,15 @@ int PickNext() {
     if (n == 0 || OkCount() == 0) return -1;
     if (s_cfg.order != CYCLE_ORDER_FIXED && TierMode()) return PickTier();
     if (s_cfg.order == CYCLE_ORDER_FIXED) {
-        if (s_cur >= 0 && !s_cfg.loop) {
+        // ui3: leaving a guest, the walk goes on after the stage the visit started from (no guest: at == s_cur)
+        const int at = IsGuest(s_cur) ? s_guestFrom : s_cur;
+        if (at >= 0 && !s_cfg.loop) {
             bool anyAfter = false;       // no loop: stop on the last valid stage
-            for (int j = s_cur + 1; j < n; j++) if (Drawable(j) && !OverlayBlocked(j)) { anyAfter = true; break; }
+            for (int j = at + 1; j < n; j++) if (Drawable(j) && !OverlayBlocked(j)) { anyAfter = true; break; }
             if (!anyAfter) return -1;
         }
         for (int k = 1; k <= n; k++) {
-            int j = ((s_cur < 0 ? -1 : s_cur) + k) % n;
+            int j = ((at < 0 ? -1 : at) + k) % n;
             if (j < 0) j += n;
             if (Drawable(j) && !OverlayBlocked(j)) return j;   // brief BY: pass over an empty photo stage
         }
@@ -902,15 +926,15 @@ int PickNext() {
     auto samePath = [&](int j) { return _wcsicmp(s_cfg.stages[j].path.c_str(), curPath.c_str()) == 0; };
     std::vector<int> cands;
     for (int j = 0; j < n; j++) {
-        if (j == s_cur || !Drawable(j) || samePath(j)) continue;
+        if (j == s_cur || !Drawable(j) || samePath(j) || IsRated(j)) continue;
         const bool ov = s_cfg.stages[j].overlay;
-        if (ov && IsPhoto(s_cur)) continue;          // pre-flight 4
+        if (ov && (IsPhoto(s_cur) || IsGuest(s_cur))) continue;   // pre-flight 4 (ui3: nor over a guest)
         if (onOverlay) { if (!ov && s_cfg.stages[j].look != curLook) cands.push_back(j); }
         else if (Valid(s_cur) ? (ov || s_cfg.stages[j].look != curLook) : !ov) cands.push_back(j);
     }
     if (cands.empty())
         for (int j = 0; j < n; j++)
-            if (j != s_cur && Drawable(j) && !samePath(j) && !s_cfg.stages[j].overlay)
+            if (j != s_cur && Drawable(j) && !samePath(j) && !s_cfg.stages[j].overlay && !IsRated(j))
                 cands.push_back(j);
     if (cands.empty()) return -1;
     // weighted draw (stage_N_weight, default 1); logged so a seeded run shows it
@@ -940,12 +964,40 @@ int PickNext() {
     return pick;
 }
 
+// The RATED look stages (stage_N_rating; cycle.h), asked ONCE at each dwell end, before the usual draw: stage j
+// comes up with chance rating_j / (the colour director's stills' ratings + every rated stage's rating). -1 = none
+// this time (the usual draw follows). No rated stage with a rating above 0 = no random number is used: the draws
+// of before, number for number.
+int DrawRated(const char* why) {
+    if (s_cfg.order == CYCLE_ORDER_FIXED) return -1;
+    const int n = (int)s_cfg.stages.size();
+    float sumR = 0.0f;
+    for (int j = 0; j < n; j++)
+        if (IsRated(j) && Drawable(j)) sumR += fminf(fmaxf(s_cfg.stages[j].rating, 0.0f), 10.0f);
+    if (sumR <= 0.0f) return -1;
+    if (!s_rngSeeded) SeedRng();
+    const float total = sumR + fmaxf(DirectorLookRatingSum(), 0.0f);
+    const float u = NextUnit();
+    float acc = 0.0f;
+    int pick = -1;
+    for (int j = 0; j < n && pick < 0; j++) {
+        if (!IsRated(j) || !Drawable(j)) continue;
+        acc += fminf(fmaxf(s_cfg.stages[j].rating, 0.0f), 10.0f) / total;
+        if (u < acc) pick = j;
+    }
+    if (!s_quiet)
+        Log("[cycle] rated draw (%s) u=%.4f: the rated looks hold %.1f of %.1f rating points (%.1f %%) -> %s%ls\n",
+            why, u, sumR, total, 100.0f * sumR / total, pick >= 0 ? "stage " : "none, the usual draw follows",
+            pick >= 0 ? (std::to_wstring(pick + 1) + L" " + s_cfg.stages[pick].name).c_str() : L"");
+    return pick;
+}
+
 // [cycle] resume 0 (T8): the boot's stage, a weighted draw over the look stages (no overlay, no photo) from its
 // OWN stream, so the cycle's own draws keep their number and order
 int PickBootRandom() {
     std::vector<int> cands;
     for (int j = 0; j < (int)s_cfg.stages.size(); j++)
-        if (Drawable(j) && !IsOverlay(j) && !IsPhoto(j)) cands.push_back(j);
+        if (Drawable(j) && !IsOverlay(j) && !IsPhoto(j) && !IsRated(j)) cands.push_back(j);
     if (cands.empty()) return -1;
     const unsigned seed = s_seedOverride ? s_seedOverride : s_cfg.seed;
     uint64_t z = (seed ? (uint64_t)seed * 0x2545F4914F6CDD1Dull : (GetTickCount64() ^ ((uint64_t)GetCurrentProcessId() << 32)))
@@ -1022,6 +1074,7 @@ bool WantsLerp(int target) {
     // leaving an overlay always fades: the lerp's t=1 config would drop the
     // overlay's keys (a mirror fold) in one visible snap
     if (!IsFluid(s_cur) || !IsFluid(target)) return false;
+    if (IsGuest(s_cur) || IsGuest(target)) return false;   // ui3: a guest is entered and left through black
     const int tr = s_cfg.stages[target].transition;
     return tr == CYCLE_TR_DEFAULT || tr == CYCLE_TR_LERP;
 }
@@ -1139,6 +1192,7 @@ bool WantsScheme(int target) {
     const CycleStage& A = s_cfg.stages[s_cur];
     const CycleStage& B = s_cfg.stages[target];
     if (A.look != CYCLE_LOOK_ACID || B.look != CYCLE_LOOK_ACID) return false;
+    if (IsRated(s_cur) || IsRated(target)) return false;   // a rated look stage: always through black (cycle.h)
     if (B.transition == CYCLE_TR_CUT || B.transition == CYCLE_TR_FADE) return false;
     // ...and LEAVING one marked cut/fade takes the fade too (brief BX: the grey
     // heart shares the Schemes' base, and its amount is not one the swap ramps,
@@ -1346,7 +1400,7 @@ void PhotoFallback(FluidRenderer& r, const char* why) {
     if (!Valid(n) || n == ph || IsOverlay(n)) {
         n = -1;
         for (int j = 0; j < (int)s_cfg.stages.size(); j++)
-            if (j != ph && Valid(j) && !IsOverlay(j) && !IsPhoto(j)) { n = j; break; }
+            if (j != ph && Valid(j) && !IsOverlay(j) && !IsPhoto(j) && !IsGuest(j)) { n = j; break; }
     }
     if (n < 0) {
         Log("[cycle] photo stage %d: %s, and no look stage to fall back to\n", ph + 1, why);
@@ -1422,6 +1476,7 @@ unsigned CycleSeed() { return s_seedOverride ? s_seedOverride : s_cfg.seed; }
 
 void CycleLoad(const wchar_t* ini) {
     s_cfg = CycleConfig{};
+    s_guestLive = false;                     // ui3: a fresh list has no guest
     s_iniPath = ini ? ini : L"";
     if (s_iniPath.empty()) return;
     const wchar_t* I = s_iniPath.c_str();
@@ -1493,6 +1548,11 @@ void CycleLoad(const wchar_t* ini) {
         st.tier = CycleTierFromName(IniStr(S, K(L"tier"), I).c_str());
         st.lerpSec = IniF(S, K(L"lerp"), -1.0f, I);
         st.journey = IniStr(S, K(L"journey"), I);
+        st.rateKey = IniStr(S, K(L"rating"), I);                 // a RATED look stage (cycle.h)
+        if (!st.rateKey.empty()) {
+            st.rating = fminf(fmaxf(IniF(L"looks", st.rateKey.c_str(), 2.0f, I), 0.0f), 10.0f);
+            Log("[cycle] stage %d is a rated look: [looks] %ls = %g of 10\n", k, st.rateKey.c_str(), st.rating);
+        }
         ResolveStage(st, s_iniPath);
         if (!st.ok) Log("[cycle] stage %d: file not found: %ls\n", k, st.path.c_str());
         s_cfg.stages.push_back(st);
@@ -1560,6 +1620,280 @@ bool CycleBoot(FluidConfig& cfg) {
     return true;
 }
 
+// ---- ui3 (2026-11-23): Keep this / a visit's hold of the stage timer --------------------------------------------
+// Its own deadline on the wall clock (GetTickCount64; under --shot the wallpaper time main.cpp hands in), never
+// s_paused: the Advanced screen's edit hold uses that, and resuming one would cancel the other. Checked in CycleTick's
+// DWELL case only: while it runs the dwell timer does not advance, so no dwell end, no midpoint draw, no dark-screen
+// switch. After a pause it releases on the first tick. s_holdUntil 0 = no hold: every path is today's.
+static double s_holdUntil = 0.0;          // hold-clock seconds; 0 = none
+static bool   s_holdEndDwell = false;     // a visit: its end ends the dwell too (the normal draw follows at once)
+static int    s_holdStage = -1;           // a visit: the stage it went to
+static float  s_holdSec = 0.0f;           // its length (the log)
+static bool   s_holdClockSet = false;     // --shot: the wallpaper time is the hold clock
+static double s_holdClockNow = 0.0;
+double CycleHoldClock() { return s_holdClockSet ? s_holdClockNow : (double)GetTickCount64() / 1000.0; }
+void   CycleHoldSetClock(double wallpaperSec) { s_holdClockSet = true; s_holdClockNow = wallpaperSec; }
+static void GuestReapIdle(const char* why);   // ui3 guest visit (below)
+void CycleHold(float sec, bool endDwell, int stage) {
+    const char* tag = endDwell ? "[visit]" : "[keep]";
+    if (!(sec > 0.0f)) {
+        if (s_holdUntil > 0.0) Log("%s stage timer let go (%.0f s early)\n", s_holdEndDwell ? "[visit]" : "[keep]",
+                                   fmax(s_holdUntil - CycleHoldClock(), 0.0));
+        s_holdUntil = 0.0; s_holdEndDwell = false; s_holdStage = -1;
+        if (s_guestLive) GuestReapIdle("the visit was let go");   // ui3: a guest nothing shows any more leaves the list
+        return;
+    }
+    const double now = CycleHoldClock();
+    s_holdUntil = fmax(now + sec, 1e-6);
+    s_holdEndDwell = endDwell;
+    s_holdStage = endDwell ? stage : -1;
+    s_holdSec = sec;
+    Log("%s stage timer held %.0f s (hold clock %.1f -> %.1f)%s%ls\n", tag, sec, now, s_holdUntil,
+        Valid(s_holdStage) ? ", visiting " : "", Valid(s_holdStage) ? s_cfg.stages[s_holdStage].name.c_str() : L"");
+}
+float CycleHoldLeftSec() { return s_holdUntil > 0.0 ? (float)fmax(s_holdUntil - CycleHoldClock(), 0.0) : 0.0f; }
+bool  CycleHoldIsVisit() { return s_holdUntil > 0.0 && s_holdEndDwell; }
+int   CycleHoldStage() { return s_holdUntil > 0.0 ? s_holdStage : -1; }
+// "Back to automatic now" / the visit's X: the visit ends at the next dwell tick through its normal end (the dwell
+// ends with it, the draw follows), so the stage change happens in the cycle's own frame, never from the UI
+void CycleVisitEndNow() {
+    if (!(s_holdUntil > 0.0) || !s_holdEndDwell) return;
+    Log("[visit] ended by hand: back to automatic now\n");
+    s_holdUntil = 1e-6;                   // expired: the next DWELL tick lets go and ends the dwell
+}
+// Keep this (the Settings window, --cycle-keep-at): the stage timer waits while the cycle runs, and the colour
+// director's hold waits while it runs (DirectorKeep). sec <= 0 lets both go.
+void CycleKeepThis(float sec) {
+    if (!(sec > 0.0f)) {
+        if (!s_holdEndDwell) CycleHold(0.0f, false, -1);
+        DirectorKeep(0.0f);
+        return;
+    }
+    if (s_holdEndDwell) CycleHold(0.0f, false, -1);   // never over a visit (the UI offers none)
+    if (s_phase != CYCLE_OFF) CycleHold(sec, false, -1);
+    if (DirectorActive()) DirectorKeep(sec);
+}
+// A visit to a stage (a rated look): the cycle fades to it and holds it sec s, then the automatic mode carries on
+// (the dwell ends with the hold). A keep is let go first.
+bool CycleVisit(int stage, float sec) {
+    if (!Valid(stage) || !(sec > 0.0f)) return false;
+    DirectorKeep(0.0f);
+    CycleJump(stage);
+    if (s_phase == CYCLE_OFF || (s_cur != stage && s_next != stage)) {
+        Log("[visit] refused: the cycle did not take stage %d\n", stage + 1);
+        return false;
+    }
+    CycleHold(sec, true, stage);
+    return true;
+}
+// one DWELL tick of a hold: true = the dwell timer waits this tick
+static bool CycleHoldStep() {
+    if (s_holdStage >= 0 && s_cur != s_holdStage) {   // something else left the visited look: the visit is over
+        Log("[visit] over: stage %d is on screen, not the visited %d\n", s_cur + 1, s_holdStage + 1);
+        s_holdUntil = 0.0; s_holdEndDwell = false; s_holdStage = -1;
+        return false;
+    }
+    if (CycleHoldClock() < s_holdUntil) return true;
+    Log("%s stage timer released after %.0f s%s\n", s_holdEndDwell ? "[visit]" : "[keep]", s_holdSec,
+        s_holdEndDwell ? ": the dwell ends, automatic carries on" : ": the dwell carries on where it was");
+    if (s_holdEndDwell) s_dwellT = fmaxf(s_dwellT, s_dwellTarget);
+    s_holdUntil = 0.0; s_holdEndDwell = false; s_holdStage = -1;
+    return false;
+}
+
+// ---- ui3 (2026-11-23): the GUEST visit (cycle.h CycleVisitGuest) -------------------------------------------------
+// A visit to Ink / Fluid, which are not stages of the owner's list: ONE guest stage is appended for the visit (always
+// the list's last entry), entered through black like a look stage, held with the visit hold, left through the usual
+// draw and then erased. Every function here returns at once while s_guestLive is false and s_guestPair is -1.
+static const wchar_t* const kGuestFile[2] = { L"Ink - inverted.ini", L"WE parity (fluid).ini" };
+static int GuestIndex() {
+    if (!s_guestLive) return -1;
+    for (int j = (int)s_cfg.stages.size() - 1; j >= 0; j--) if (s_cfg.stages[j].guest) return j;
+    return -1;
+}
+// The guest leaves the list. Every index the director holds is kept pointing at the same stage (the guest is the last
+// entry, so only an index naming the guest itself changes: it becomes -1; Previous's history forgets it).
+static void GuestErase(const char* why) {
+    const int g = GuestIndex();
+    s_guestLive = false;
+    if (g < 0) return;
+    const int before = (int)s_cfg.stages.size();
+    const std::wstring name = s_cfg.stages[g].name;
+    s_cfg.stages.erase(s_cfg.stages.begin() + g);
+    auto fix = [g](int& i) { if (i == g) i = -1; else if (i > g) i--; };
+    fix(s_cur); fix(s_next); fix(s_base); fix(s_fromAtBlack); fix(s_queued); fix(s_softStage);
+    fix(s_photoLoadStage); fix(s_excludeStage); fix(s_guestFrom);
+    if (s_holdStage == g) { s_holdUntil = 0.0; s_holdEndDwell = false; s_holdStage = -1; }
+    else if (s_holdStage > g) s_holdStage--;
+    for (size_t k = 0; k < s_history.size();) {
+        if (s_history[k] == g) { s_history.erase(s_history.begin() + k); continue; }
+        if (s_history[k] > g) s_history[k]--;
+        k++;
+    }
+    Log("[visit] guest stage %d %ls removed (%s): %d -> %d stages\n", g + 1, name.c_str(), why, before,
+        (int)s_cfg.stages.size());
+}
+// Erased once nothing shows it: not on screen, not on its way, and no visit hold names it (headless: nothing jumped,
+// so the hold alone keeps it until it is let go).
+static void GuestReapIdle(const char* why) {
+    const int g = GuestIndex();
+    if (g < 0) { s_guestLive = false; return; }
+    if (s_cur == g || s_next == g) return;
+    if (s_holdUntil > 0.0 && s_holdStage == g) return;
+    GuestErase(why);
+}
+// Back from the visit: the pair the colour director showed before it goes into its queue (DirectorQueueLook) once the
+// director runs again, unless it came back on that very pair (vivid) by itself: queued then, its first hold would end
+// at once and the queue entry (the still on screen) be dropped, so the owner would lose the pair he came back to.
+static void GuestDeliverPair() {
+    const int i = s_guestPair, m = s_guestMode;
+    const std::wstring nm = DirectorLookName(i);
+    if (s_phase == CYCLE_OFF) {
+        Log("[visit] the pair before the visit (%ls) is not queued: the automatic mode is off\n", nm.c_str());
+        s_guestPair = -1;
+        return;
+    }
+    if (DirectorActive()) {
+        const DirectorView d = DirectorNow();
+        if (d.combo == i && m == 0)
+            Log("[visit] back: the colour director came back on %ls by itself; nothing queued\n", nm.c_str());
+        else {
+            DirectorQueueLook(i, m);
+            Log("[visit] back: %ls %s queued (the pair before the visit; the director re-engaged on %ls)\n", nm.c_str(),
+                m ? "darkroom" : "vivid", DirectorLookName(d.combo).c_str());
+        }
+        s_guestPair = -1;
+        return;
+    }
+    if (s_phase == CYCLE_DWELL && Valid(s_cur)) {   // a stage without the colour director: the pair waits in its queue
+        DirectorQueueLook(i, m);
+        Log("[visit] back: %ls %s queued; it waits for the colour director\n", nm.c_str(), m ? "darkroom" : "vivid");
+        s_guestPair = -1;
+    }
+}
+// Once per CycleTick while a guest exists or its pair waits (CycleTick calls it only then)
+static void GuestTick() {
+    if (s_guestLive) {
+        if (s_phase == CYCLE_OFF) {          // the automatic mode went off during the visit: the look stays, not a stage
+            GuestErase("the automatic mode went off");
+            s_guestPair = -1;
+        } else {
+            GuestReapIdle("left: automatic carries on");
+        }
+    }
+    if (!s_guestLive && s_guestPair >= 0) GuestDeliverPair();
+}
+// CycleSet (below): the visit ends before the list is replaced. Its hold goes; on screen in a dwell, the dwell ends
+// (the usual draw follows at the next tick); CycleSet then strips the guest from the new list (it is never written)
+// and remaps the indices by file, as for any stage that left the list.
+static void GuestEndForSet() {
+    const int g = GuestIndex();
+    if (g < 0) { s_guestLive = false; return; }
+    Log("[visit] the stage list is being replaced: the visit ends now, guest stage %d leaves the list\n", g + 1);
+    if (s_holdStage == g) { s_holdUntil = 0.0; s_holdEndDwell = false; s_holdStage = -1; }
+    if (s_phase == CYCLE_DWELL && s_cur == g) s_dwellT = fmaxf(s_dwellT, s_dwellTarget);
+}
+
+int CycleGuestStage() { return GuestIndex(); }
+std::wstring CycleGuestFile() { const int g = GuestIndex(); return g >= 0 ? s_cfg.stages[g].path : std::wstring(); }
+int CycleListedCount() {
+    int n = 0;
+    for (const CycleStage& st : s_cfg.stages) if (!st.guest) n++;
+    return n;
+}
+std::wstring CycleGuestPreset(int kind, std::string* why) {
+    if (kind < 0 || kind > 1) { if (why) *why = "no such look"; return std::wstring(); }
+    std::vector<std::wstring> dirs;
+    auto addDir = [&](const std::wstring& file) {
+        if (file.empty()) return;
+        const std::wstring d = FolderOf(file);
+        for (const std::wstring& x : dirs) if (_wcsicmp(x.c_str(), d.c_str()) == 0) return;
+        dirs.push_back(d);
+    };
+    addDir(s_cfg.oilLayoutPath);
+    for (const CycleStage& st : s_cfg.stages) if (!st.guest) addDir(st.path);
+    wchar_t exe[MAX_PATH] = {};
+    GetModuleFileNameW(nullptr, exe, MAX_PATH);
+    addDir(Resolve(FolderOf(exe) + L"\\..\\reference\\presets\\x.ini", exe));
+    for (const std::wstring& d : dirs) {
+        const std::wstring p = d + L"\\" + kGuestFile[kind];
+        if (Exists(p)) return p;
+    }
+    if (why) {
+        char b[200];
+        snprintf(b, sizeof(b), "%ls was not found next to the cycle's preset files or in reference\\presets",
+                 kGuestFile[kind]);
+        *why = b;
+    }
+    return std::wstring();
+}
+
+bool CycleVisitGuest(const std::wstring& presetPath, float sec) {
+    if (presetPath.empty() || !(sec > 0.0f)) return false;
+    const bool live = g_renderer != nullptr;
+    if (live && s_phase == CYCLE_OFF) {
+        Log("[visit] guest visit refused: the automatic mode is off (a visit returns to it)\n");
+        return false;
+    }
+    CycleStage st;
+    st.file = presetPath;                    // absolute: the [cycle] ini's folder plays no part
+    st.guest = true;
+    st.transition = CYCLE_TR_FADE;           // entered and left through black (never a lerp)
+    st.jitter = 0.0f;
+    st.weight = 0.0f;
+    st.dwellSec = fminf(fmaxf(sec, 1.0f), kMaxDwellSec);   // only if the hold were lost: it still leaves by itself
+    ResolveStage(st, s_iniPath.empty() ? std::wstring(g_iniPath) : s_iniPath);
+    if (!st.ok || st.photo) {
+        Log("[visit] guest visit refused: %ls is not a usable look preset\n", st.path.c_str());
+        return false;
+    }
+    if (s_guestLive) GuestReapIdle("a new visit");   // a guest already left: gone before the next one
+    int g = GuestIndex();
+    const int before = (int)s_cfg.stages.size();
+    if (g < 0) {                             // the first visit of a run: where it started, the pair on screen
+        s_guestFrom = s_cur;
+        if (s_guestPair < 0 && DirectorActive()) {
+            const DirectorView d = DirectorNow();
+            if (d.combo >= 0) { s_guestPair = d.combo; s_guestMode = d.mode; }
+        }
+    }
+    DirectorKeep(0.0f);                      // a keep ends with a visit
+    bool reenter = false;
+    if (g >= 0 && _wcsicmp(s_cfg.stages[g].path.c_str(), st.path.c_str()) == 0) {
+        Log("[visit] guest stage %d %ls again: only its hold starts over\n", g + 1, st.name.c_str());
+    } else if (g >= 0) {
+        Log("[visit] guest stage %d %ls replaced by %ls (%s) in place: %d stages\n", g + 1,
+            s_cfg.stages[g].name.c_str(), st.name.c_str(), LookName(st.look), before);
+        s_cfg.stages[g] = st;
+        reenter = true;
+    } else {
+        s_cfg.stages.push_back(st);
+        g = (int)s_cfg.stages.size() - 1;
+        s_guestLive = true;
+        Log("[visit] guest stage %d = %ls (%s) from %ls: %d -> %d stages (%d in the owner's list)%s%ls\n", g + 1,
+            st.name.c_str(), LookName(st.look), st.path.c_str(), before, (int)s_cfg.stages.size(), CycleListedCount(),
+            s_guestPair >= 0 ? "; the pair before it: " : "", s_guestPair >= 0 ? DirectorLookName(s_guestPair).c_str() : L"");
+    }
+    if (live) {
+        // on screen and staying, or on its way (a guest fading out to the next stage is on its way OUT: jump back)
+        const bool leaving = s_cur == g && s_phase == CYCLE_FADE_OUT && Valid(s_next) && s_next != g;
+        const bool there = (s_cur == g && !leaving) || s_next == g;
+        if (reenter && there) {              // the old guest is on screen or on its way: the new one, through black
+            Log("[cycle] jump -> %d (the guest, re-entered)\n", g + 1);
+            BeginSwitch(*g_renderer, g);
+        } else if (!there) {
+            CycleJump(g);
+        }
+        if (s_phase == CYCLE_OFF || (s_cur != g && s_next != g)) {
+            Log("[visit] guest visit refused: the cycle did not take guest stage %d\n", g + 1);
+            if (s_cur != g && s_next != g) GuestErase("refused");
+            return false;
+        }
+    }
+    CycleHold(sec, true, g);
+    return true;
+}
+
 CycleFrame CycleTick(FluidRenderer& r, float dt) {
     CycleFrame f;
     f.stepDt = 1.0f / s_cfg.warmupStepHz;
@@ -1567,6 +1901,8 @@ CycleFrame CycleTick(FluidRenderer& r, float dt) {
     s_clock += dt;
     s_tickSerial++;                          // brief BY: one photo-folder scan per tick
     AnimatorsTick();
+    if (s_holdUntil > 0.0 && s_phase == CYCLE_OFF) CycleHold(0.0f, false, -1);   // ui3: the cycle let go: so does a hold
+    if (s_guestLive || s_guestPair >= 0) GuestTick();   // ui3 guest visit: erase a guest that was left, queue the pair
     if (s_phase == CYCLE_OFF) { s_fade = 1.0f; return f; }
     if (s_burstWatch && !r.AnimatorKicking(ANIM_PALETTE)) {   // the burst has landed
         s_burstWatch = false;
@@ -1591,12 +1927,13 @@ CycleFrame CycleTick(FluidRenderer& r, float dt) {
             Log("[cycle] journey ended; hue released\n");
         }
         if (s_paused) break;                 // Settings open: the dwell timer holds
+        if (s_holdUntil > 0.0 && CycleHoldStep()) break;   // ui3 Keep this / a visit: the dwell timer waits
         s_dwellT += dt;
         // tier mode: an oil / ink visit's ONE draw, at its dwell midpoint, for
         // the slot after the WE interlude -- or the burst moment, which fires
         // here on an oil stage that can take it (else it is redrawn)
         if (!s_midDrawn && s_dwellT >= 0.5f * s_dwellTarget && s_cfg.order != CYCLE_ORDER_FIXED &&
-            TierMode() && IsOtherLook(s_cur)) {
+            TierMode() && IsOtherLook(s_cur) && !IsGuest(s_cur)) {   // ui3: a guest visit makes no midpoint draw
             s_midDrawn = true;
             if (s_queued < 0) {
                 const bool canBurst = s_cfg.stages[s_cur].burstOk && !s_burstDone;
@@ -1618,7 +1955,8 @@ CycleFrame CycleTick(FluidRenderer& r, float dt) {
                     s_dwellT - s_darkSince >= 10.0f;
         }
         if (s_dwellT >= s_dwellTarget || early) {
-            const int n = PickNext();
+            const int rated = DrawRated("dwell end");            // the rated look stages first (cycle.h)
+            const int n = rated >= 0 ? rated : PickNext();
             if (early) Log("[cycle] dark-screen trigger after %.0f s\n", s_dwellT);
             if (Valid(n) && n != s_cur) BeginSwitch(r, n);
             else { s_dwellT = 0.0f; s_darkSince = -1.0f; }   // nowhere to go: dwell again
@@ -1766,6 +2104,12 @@ void CycleNext() {
     // stage is only the director's base, so the stage switch below shows nothing; the press then ALSO ends the
     // director's hold, and its next colour change starts at once (DirectorSkip). With the cycle off the director's
     // change is all a press can mean.
+    // ui3: Next (the Settings window's and the tray's) ends a keep or a visit first; with none, nothing here runs
+    if (s_holdUntil > 0.0 || DirectorKeepLeftSec() > 0.0f) {
+        Log("[keep] Next pressed: the keep / visit ends\n");
+        CycleHold(0.0f, false, -1);
+        DirectorKeep(0.0f);
+    }
     if (g_renderer && s_phase == CYCLE_OFF && DirectorActive()) {
         if (DirectorSkip()) Log("[cycle] next (cycle off): the colour director starts its next change now\n");
         return;
@@ -1901,6 +2245,7 @@ bool CycleStageComposesBeyondFile(int stage) {
 }
 
 void CycleSet(const CycleConfig& c) {
+    if (s_guestLive) GuestEndForSet();       // ui3: a guest visit ends before the list is replaced (never written)
     const bool wasEnabled = s_cfg.enabled;
     s_cfg.loop = c.loop;
     s_cfg.order = c.order;
@@ -1929,6 +2274,10 @@ void CycleSet(const CycleConfig& c) {
     const std::wstring curPath = pathOf(s_cur), nextPath = pathOf(s_next), basePath = pathOf(s_base),
                        fromPath = pathOf(s_fromAtBlack), photoPath = pathOf(s_photoLoadStage);
     s_cfg.stages = c.stages;
+    // ui3: a guest stage never enters the owner's list (a caller's copy of CycleGet() carries it): stripped here,
+    // before anything below resolves, remaps or writes; GuestEndForSet (the top of CycleSet) has ended its visit
+    for (size_t k = 0; k < s_cfg.stages.size();) if (s_cfg.stages[k].guest) s_cfg.stages.erase(s_cfg.stages.begin() + k); else k++;
+    s_guestLive = false;
     s_queued = -1;                           // indices may have moved
     const std::wstring base = s_iniPath.empty() ? std::wstring(g_iniPath) : s_iniPath;
     for (auto& st : s_cfg.stages) ResolveStage(st, base);
@@ -2014,10 +2363,36 @@ void CycleSet(const CycleConfig& c) {
             }
             if (st.lerpSec >= 0.0f)    putF(K(L"lerp"), st.lerpSec);
             if (!st.journey.empty())   putS(K(L"journey"), st.journey.c_str());
+            if (!st.rateKey.empty())   putS(K(L"rating"), st.rateKey.c_str());
         }
         if (s_cur >= 0) putI(L"current", s_cur + 1);
     }
     if (c.enabled != wasEnabled || restart) CycleSetEnabled(c.enabled, false);
+}
+
+// The rated look stages for the LOOKS table (cycle.h)
+int CycleRatedCount() {
+    int n = 0;
+    for (int j = 0; j < (int)s_cfg.stages.size(); j++) if (IsRated(j)) n++;
+    return n;
+}
+int CycleRatedStage(int k) {
+    for (int j = 0; j < (int)s_cfg.stages.size(); j++) if (IsRated(j) && k-- == 0) return j;
+    return -1;
+}
+float CycleRatedRating(int k) {
+    const int j = CycleRatedStage(k);
+    return j >= 0 ? s_cfg.stages[j].rating : 0.0f;
+}
+void CycleSetRatedRating(int k, float v) {
+    const int j = CycleRatedStage(k);
+    if (j < 0) return;
+    CycleStage& st = s_cfg.stages[j];
+    st.rating = fminf(fmaxf(v, 0.0f), 10.0f);
+    if (g_configReadOnly || !g_iniPath[0] || _wcsicmp(s_iniPath.c_str(), g_iniPath) != 0) return;
+    wchar_t val[16];
+    swprintf_s(val, L"%g", st.rating);
+    WritePrivateProfileStringW(L"looks", st.rateKey.c_str(), val, g_iniPath);
 }
 
 CycleStatus CycleState() {
@@ -2117,7 +2492,8 @@ void CycleDrawTest(int draws) {
             if (d == kBurst) s_burstDone = true;
             else if (Valid(d)) s_queued = d;
         }
-        const int nx = PickNext();
+        const int rd = DrawRated("drawtest");                    // as at the dwell end
+        const int nx = rd >= 0 ? rd : PickNext();
         if (!Valid(nx)) break;
         if (IsPhoto(s_cur) && IsOverlay(nx)) overlayOnPhoto++;
         if (IsPhoto(s_cur) && IsPhoto(nx)) photoAfterPhoto++;
@@ -2143,11 +2519,11 @@ void CycleDrawTest(int draws) {
     // the burst moment in wild with burst_weight)
     float tot[3] = {};
     for (int j = 0; j < n; j++)
-        if (Valid(j) && !IsFluid(j)) tot[TierOf(j)] += fmaxf(s_cfg.stages[j].weight, 0.0f);
+        if (Valid(j) && !IsFluid(j) && !IsRated(j)) tot[TierOf(j)] += fmaxf(s_cfg.stages[j].weight, 0.0f);
     tot[CYCLE_TIER_WILD] += fmaxf(s_cfg.burstWeight, 0.0f);
     for (int t = 0; t < 3; t++) {
         for (int j = 0; j < n; j++) {
-            if (!Valid(j) || IsFluid(j) || TierOf(j) != t) continue;
+            if (!Valid(j) || IsFluid(j) || IsRated(j) || TierOf(j) != t) continue;
             const double inTier = s_statTier[t] > 0 ? 100.0 * s_statStage[j] / (double)s_statTier[t] : 0.0;
             const double nomIn = tot[t] > 0.0f ? 100.0 * s_cfg.stages[j].weight / tot[t] : 0.0;
             Log("[drawtest]   %-8s x%-4g %-34ls drawn %5ld = %5.2f%% of all, %5.2f%% of its tier (nominal %5.2f%%)\n",
@@ -2165,6 +2541,11 @@ void CycleDrawTest(int draws) {
     for (int j = 0; j < n; j++)
         if (IsFluid(j))
             Log("[drawtest]   WE (alternates) %-34ls visited %ld\n", s_cfg.stages[j].name.c_str(), visitCount[j]);
+    for (int j = 0; j < n; j++)
+        if (IsRated(j))
+            Log("[drawtest]   rated %-4g %-34ls visited %ld of %ld = %.2f%% of the visits\n", s_cfg.stages[j].rating,
+                s_cfg.stages[j].name.c_str(), visitCount[j], visits,
+                100.0 * visitCount[j] / (double)(visits > 0 ? visits : 1));
     s_cur = -1;
     s_queued = -1;
     s_base = -1;
@@ -2225,6 +2606,7 @@ std::wstring CycleStageFile() {
     // Config into the photo ini. "" on an overlay too: Save wrote the whole
     // look under it into the overlay's partial ini (review 2026-10-04 R7).
     if (s_phase == CYCLE_OFF || !Valid(s_cur) || IsPhoto(s_cur) || IsOverlay(s_cur)) return L"";
+    if (IsGuest(s_cur)) return L"";          // ui3: a guest's preset is never saved into (it is not a stage of the list)
     return s_cfg.stages[s_cur].path;
 }
 
@@ -2248,7 +2630,7 @@ bool CycleHasStage(const std::wstring& file) {
     const std::wstring base = s_iniPath.empty() ? std::wstring(g_iniPath) : s_iniPath;
     const std::wstring abs = Resolve(file, base);
     for (auto& st : s_cfg.stages)
-        if (_wcsicmp(st.path.c_str(), abs.c_str()) == 0) return true;
+        if (!st.guest && _wcsicmp(st.path.c_str(), abs.c_str()) == 0) return true;   // ui3: a guest is not "in the cycle"
     return false;
 }
 

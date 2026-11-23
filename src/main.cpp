@@ -47,6 +47,12 @@
 //   --cycle-seed N (default --seed) / --cycle-stage N (1-based start)
 //   --cycle-next-at T[,T..]  Next stage at wallpaper time T (the tray's call)
 //   --cycle-pause-at T1,T2   CyclePause at T1, CycleResume at T2 (animators.h)
+//   --shot-queue C:M@T[,..]  the Settings window's "show next": queue combo C (kComboSeed name), mode M
+//                      (0 vivid / 1 darkroom) at wallpaper time T (the colour director's queue)
+//   --cycle-keep-at T,SEC    ui3 Keep this at wallpaper time T for SEC s ([keep] lines: start, end)
+//   --cycle-visit-at T,N,SEC ui3 a visit to stage N (1-based, a rated look) at T for SEC s ([visit] lines);
+//                      N = ink | fluid: a GUEST visit to that look's start preset (CycleVisitGuest)
+//   --shot-hide C@T    ui3 the Settings window's Remove of combo C at T (DirectorHideCombo, memory only)
 //   --shot-freeze NAME,T1,T2 Freeze(palette|hue2|rig|hueshift|transition|clocks)
 //   --clocks-dryrun HOURS    brief CLOCKS: the clock scheduler alone (CPU, 10 Hz
 //                      virtual time), one line per draw + a summary, then exit
@@ -71,6 +77,10 @@
 //                      loop's rebuild (Shutdown + soft init, same config), rendering on to
 //                      the capture; [devlost] lines in the shot log. Without it a real
 //                      device loss in a --shot run stays fatal.
+//   --snapshot-at T <png>  ui3 B5 test: the Settings window's snapshot (RequestSnapshot) asked
+//                      in the frame that completes T s of wallpaper time (T = --shot-delay:
+//                      the shot's own frame), written as an 8-bit PNG when TakeSnapshot
+//                      delivers; a [snapshot] line in the shot log. The shot is unchanged.
 //   --test-murk-async  post-night T1 gate: the murk bakes on the live wallpaper's worker path
 //                      (the volume lands frames later) instead of synchronously in the frame
 //
@@ -720,6 +730,8 @@ static void LoadConfigFromIni(const wchar_t* ini, FluidConfig& cfg) {
         k.toneKnee     = getF(S, L"tone_knee", k.toneKnee);
         k.toneChroma   = getF(S, L"tone_chroma", k.toneChroma);
         k.tintHueBlend = getF(S, L"tint_hue_blend", k.tintHueBlend);
+        k.blackOnly    = getI(S, L"black_only", k.blackOnly);       // test keys (ag-ink)
+        k.filmColour   = getF(S, L"film_colour", k.filmColour);
         struct { const wchar_t* key; float* dst; } triples[] = {
             { L"paper_color", k.paper }, { L"tint_thin", k.tintThin },
             { L"tint_thick",  k.tintThick },
@@ -755,6 +767,11 @@ static void LoadConfigFromIni(const wchar_t* ini, FluidConfig& cfg) {
         }
         mr.centerX = getF(S, L"center_x", mr.centerX);
         mr.centerY = getF(S, L"center_y", mr.centerY);
+        mr.camFov    = getF(S, L"cam_fov", mr.camFov);         // mode 5, the fish-eye camera (test)
+        mr.camPitch  = getF(S, L"cam_pitch", mr.camPitch);
+        mr.camHeight = getF(S, L"cam_height", mr.camHeight);
+        mr.camFade   = getF(S, L"cam_fade", mr.camFade);
+        mr.camRelief = getF(S, L"cam_relief", mr.camRelief);
     }
     // ---- [post]: film grain + aberration vignette, EVERY look --------------
     // The last thing that happens to the composite. Both amounts default to 0
@@ -871,7 +888,12 @@ static void LoadConfigFromIni(const wchar_t* ini, FluidConfig& cfg) {
         d.spatterSpread = getF(S, L"spatter_spread", d.spatterSpread);
         d.colorMode     = getI(S, L"color_mode", d.colorMode);
         d.obeyGovernor  = getB(S, L"obey_governor", d.obeyGovernor);
-        d.asymmetry     = getF(S, L"asymmetry", d.asymmetry);
+        d.inBlack       = getF(S, L"in_black", d.inBlack);
+        d.inkRise       = getF(S, L"ink_rise", d.inkRise);   // test keys (ag-ink)
+        d.pushFilm      = getB(S, L"push_film", d.pushFilm);
+        d.impulse       = getF(S, L"impulse", d.impulse);      // test keys (round 3)
+        d.inkSwirl      = getF(S, L"ink_swirl", d.inkSwirl);
+        d.asymmetry    = getF(S, L"asymmetry", d.asymmetry);
         d.tailRadiusFrac= getF(S, L"tail_radius_frac", d.tailRadiusFrac);
         d.tailSpeed     = getF(S, L"tail_speed", d.tailSpeed);
         d.impulseSpread = getF(S, L"impulse_spread", d.impulseSpread);
@@ -1015,6 +1037,10 @@ static void LoadConfigFromIni(const wchar_t* ini, FluidConfig& cfg) {
         a.filmEqualLoadP     = getF(S, L"film_equal_load_patches", a.filmEqualLoadP);
         a.filmHue2Seam       = getF(S, L"film_hue2_seam",   a.filmHue2Seam);
         a.filmHue2SeamStretch = getF(S, L"film_hue2_seam_stretch", a.filmHue2SeamStretch);   // T8b
+        a.filmHue2Leak       = getF(S, L"film_hue2_leak",   a.filmHue2Leak);
+        a.filmHue2LeakReach  = getF(S, L"film_hue2_leak_reach", a.filmHue2LeakReach);
+        a.filmHue2LeakCore   = getF(S, L"film_hue2_leak_core", a.filmHue2LeakCore);
+        a.filmHue2LeakIn     = getF(S, L"film_hue2_leak_in", a.filmHue2LeakIn);
         a.crustHueMix        = getF(S, L"crust_hue_mix",    a.crustHueMix);
         a.filmHue2Wobble     = getF(S, L"film_hue2_wobble",        a.filmHue2Wobble);
         a.filmHue2SeedRows   = getF(S, L"film_hue2_seed_rows",     a.filmHue2SeedRows);
@@ -1037,6 +1063,8 @@ static void LoadConfigFromIni(const wchar_t* ini, FluidConfig& cfg) {
         a.dropletRacerRMax   = getF(S, L"droplet_racer_r_max",  a.dropletRacerRMax);
         a.dropletRingRMul    = getF(S, L"droplet_ring_r_mul",    a.dropletRingRMul);
         a.dropletRingBigFrac = getF(S, L"droplet_ring_big_frac", a.dropletRingBigFrac);
+        a.dropletBigFrac     = getF(S, L"droplet_big_frac",      a.dropletBigFrac);
+        a.dropletBigRMul     = getF(S, L"droplet_big_r_mul",     a.dropletBigRMul);
         a.dropletCoalesce  = getF(S, L"droplet_coalesce",   a.dropletCoalesce);
         a.dropletCoalesceS = getF(S, L"droplet_coalesce_s", a.dropletCoalesceS);
         a.conserveMass     = getF(S, L"conserve_mass",  a.conserveMass);
@@ -1837,6 +1865,7 @@ static void ShowTrayMenuBody(HWND hwnd, HMENU presets) {
         AppendMenuW(cycle, MF_STRING | (running ? 0 : MF_GRAYED), CMD_CYCLE_PREV, L"Previous stage");
         AppendMenuW(cycle, MF_SEPARATOR, 0, nullptr);
         for (int i = 0; i < (int)cc.stages.size() && i < 99; i++) {
+            if (cc.stages[i].guest) continue;    // ui3: a guest visit (Ink / Fluid) is not a stage of the playlist
             const std::wstring label = CycleStageLabel(i);
             AppendMenuW(cycle, MF_STRING | (cc.stages[i].ok ? 0 : MF_GRAYED) |
                                (running && i == cs.stage ? MF_CHECKED : 0),
@@ -2407,6 +2436,8 @@ static void WriteConfigKeys(const wchar_t* path, const FluidConfig& c, bool incl
         putF(S, L"tone_knee", k.toneKnee, 3);
         putF(S, L"tone_chroma", k.toneChroma, 3);
         putF(S, L"tint_hue_blend", k.tintHueBlend, 3);
+        if (k.blackOnly) putI(S, L"black_only", k.blackOnly);              // test keys: written only while on
+        if (k.blackOnly && k.filmColour > 0.0f) putF(S, L"film_colour", k.filmColour, 2);
         putRgb(S, L"paper_color", k.paper);
         putRgb(S, L"tint_thin", k.tintThin);
         putRgb(S, L"tint_thick", k.tintThick);
@@ -2422,6 +2453,13 @@ static void WriteConfigKeys(const wchar_t* path, const FluidConfig& c, bool incl
         putF(S, L"soft", mr.soft, 4);
         putF(S, L"center_x", mr.centerX, 4);
         putF(S, L"center_y", mr.centerY, 4);
+        if (mr.mode == 5) {                // the fish-eye camera's keys: written only while it is on
+            putF(S, L"cam_fov", mr.camFov, 1);
+            putF(S, L"cam_pitch", mr.camPitch, 1);
+            putF(S, L"cam_height", mr.camHeight, 3);
+            putF(S, L"cam_fade", mr.camFade, 3);
+            putF(S, L"cam_relief", mr.camRelief, 2);
+        }
         WritePrivateProfileStringW(S, L"center", nullptr, path);   // delete the pair form
     }
     {
@@ -2534,6 +2572,11 @@ static void WriteConfigKeys(const wchar_t* path, const FluidConfig& c, bool incl
         putF(S, L"spatter_spread", d.spatterSpread, 3);
         putI(S, L"color_mode", d.colorMode);
         putI(S, L"obey_governor", d.obeyGovernor);
+        if (d.inBlack > 0.0f) putF(S, L"in_black", d.inBlack, 3);   // test key: written only while on
+        if (d.inkRise > 0.0f) putF(S, L"ink_rise", d.inkRise, 2);   // test keys (ag-ink): written only while on
+        if (!d.pushFilm) putI(S, L"push_film", 0);
+        if (d.impulse != 1.0f) putF(S, L"impulse", d.impulse, 2);      // test keys (round 3): only while set
+        if (d.inkSwirl > 0.0f) putF(S, L"ink_swirl", d.inkSwirl, 4);
         putRgb(S, L"color", d.color);
     }
     {
@@ -2662,6 +2705,10 @@ static void WriteConfigKeys(const wchar_t* path, const FluidConfig& c, bool incl
         putF(S, L"film_equal_load_patches", a.filmEqualLoadP, 3);
         putF(S, L"film_hue2_seam", a.filmHue2Seam, 3);
         putF(S, L"film_hue2_seam_stretch", a.filmHue2SeamStretch, 2);    // T8b
+        putF(S, L"film_hue2_leak", a.filmHue2Leak, 2);
+        putF(S, L"film_hue2_leak_reach", a.filmHue2LeakReach, 2);
+        putF(S, L"film_hue2_leak_core", a.filmHue2LeakCore, 2);
+        putF(S, L"film_hue2_leak_in", a.filmHue2LeakIn, 2);
         putF(S, L"crust_hue_mix", a.crustHueMix, 3);
         putF(S, L"film_hue2_wobble", a.filmHue2Wobble, 2);
         putF(S, L"film_hue2_seed_rows", a.filmHue2SeedRows, 0);
@@ -2684,6 +2731,10 @@ static void WriteConfigKeys(const wchar_t* path, const FluidConfig& c, bool incl
         putF(S, L"droplet_racer_r_max", a.dropletRacerRMax, 4);
         putF(S, L"droplet_ring_r_mul", a.dropletRingRMul, 3);
         putF(S, L"droplet_ring_big_frac", a.dropletRingBigFrac, 3);
+        if (a.dropletBigFrac > 0.0f) {     // test keys: written only while on, so a saved ini stays as it was
+            putF(S, L"droplet_big_frac", a.dropletBigFrac, 3);
+            putF(S, L"droplet_big_r_mul", a.dropletBigRMul, 2);
+        }
         putF(S, L"droplet_coalesce", a.dropletCoalesce, 3);
         putF(S, L"droplet_coalesce_s", a.dropletCoalesceS, 3);
         putF(S, L"conserve_mass", a.conserveMass, 3);
@@ -3131,6 +3182,11 @@ struct ShotOpts {
     bool     murkAsync = false;        // --test-murk-async (post-night T1)
     bool     devLostRemoved = false;
     bool     devLostAwaitFirst = false;   // re-init done, the next good frame is logged
+    // --snapshot-at T <png> (ui3 B5): the renderer's snapshot of the frame at T, as the Settings window gets it
+    float    snapAt = -1.0f;
+    std::wstring snapPng;
+    bool     snapAsked = false, snapRecorded = false, snapDone = false;
+    long long snapAskFrame = -1, snapRecFrame = -1;
     // --shot-pour X,Y,START,DUR : hold LMB at (X,Y) px from START for DUR seconds,
     // with a slow circular drift (radius 40 px, 0.5 rev/s) like a resting hand.
     bool     pour = false;
@@ -3181,6 +3237,21 @@ struct ShotOpts {
     // statistics over N tiered draws (no renderer, no GPU), then exit.
     std::vector<float> cycleBurstAt;
     size_t   cycleBurstDone = 0;
+    // --shot-queue "<combo>:<mode>@<sec>[,...]": DirectorQueueLook(combo, mode) at wallpaper time sec (the Settings
+    // window's "show next"; mode 0 vivid / 1 darkroom; combo = a kComboSeed name such as blue_coral)
+    struct QueueAt { std::wstring combo; int mode; float t; };
+    std::vector<QueueAt> shotQueue;
+    size_t   shotQueueDone = 0;
+    // ui3 --cycle-keep-at T,SEC: the Settings window's Keep this (CycleKeepThis) at wallpaper time T for SEC s.
+    // --cycle-visit-at T,STAGE,SEC: a visit to stage STAGE (1-based; a rated look) at T for SEC s (CycleVisit).
+    // Either one makes the wallpaper time the hold clock (CycleHoldSetClock), so the [keep] / [visit] lines are exact.
+    float    keepAt = -1.0f, keepSec = 0.0f;
+    float    visitAt = -1.0f, visitSec = 0.0f;
+    int      visitStage = 0;
+    int      visitGuest = -1;          // ui3 --cycle-visit-at T,ink|fluid,SEC: 0 Ink / 1 Fluid (a guest visit), -1 = a stage
+    // ui3 --shot-hide C@T: the Settings window's Remove (DirectorHideCombo) of combo C at wallpaper time T (memory only)
+    std::wstring hideCombo;
+    float    hideAt = -1.0f;
     int      cycleDrawTest = 0;
     float    pauseAt = -1.0f, resumeAt = -1.0f;
     int      freezeAnim = -1;
@@ -3983,6 +4054,37 @@ static int RunShotMode() {
                     v = wcschr(v, L',');
                     if (v) v++;
                 }
+            } else if (wcscmp(argv[i], L"--shot-queue") == 0 && i + 1 < argc) {
+                std::wstring v = argv[++i];
+                size_t pos = 0;
+                while (pos < v.size()) {
+                    size_t e = v.find(L',', pos);
+                    if (e == std::wstring::npos) e = v.size();
+                    const std::wstring tok = v.substr(pos, e - pos);
+                    const size_t c = tok.find(L':'), at = tok.find(L'@');
+                    if (c != std::wstring::npos && at != std::wstring::npos && at > c)
+                        o.shotQueue.push_back({ tok.substr(0, c), _wtoi(tok.substr(c + 1, at - c - 1).c_str()),
+                                                (float)_wtof(tok.substr(at + 1).c_str()) });
+                    pos = e + 1;
+                }
+            } else if (wcscmp(argv[i], L"--shot-hide") == 0 && i + 1 < argc) {   // ui3: C@T (DirectorHideCombo)
+                const std::wstring v = argv[++i];
+                const size_t at = v.find(L'@');
+                if (at != std::wstring::npos) { o.hideCombo = v.substr(0, at); o.hideAt = (float)_wtof(v.substr(at + 1).c_str()); }
+            } else if (wcscmp(argv[i], L"--cycle-keep-at") == 0 && i + 1 < argc) {
+                swscanf_s(argv[++i], L"%f,%f", &o.keepAt, &o.keepSec);
+            } else if (wcscmp(argv[i], L"--cycle-visit-at") == 0 && i + 1 < argc) {
+                // ui3: STAGE may be ink or fluid (a guest visit, CycleVisitGuest); a number = the stage visit as before
+                const std::wstring v = argv[i + 1];
+                const size_t c1 = v.find(L','), c2 = c1 == std::wstring::npos ? c1 : v.find(L',', c1 + 1);
+                const std::wstring mid = c2 == std::wstring::npos ? std::wstring() : v.substr(c1 + 1, c2 - c1 - 1);
+                if (_wcsicmp(mid.c_str(), L"ink") == 0 || _wcsicmp(mid.c_str(), L"fluid") == 0) {
+                    o.visitGuest = _wcsicmp(mid.c_str(), L"ink") == 0 ? 0 : 1;
+                    o.visitAt = (float)_wtof(v.substr(0, c1).c_str());
+                    o.visitSec = (float)_wtof(v.substr(c2 + 1).c_str());
+                    ++i;
+                } else
+                swscanf_s(argv[++i], L"%f,%d,%f", &o.visitAt, &o.visitStage, &o.visitSec);
             } else if (wcscmp(argv[i], L"--cycle-burst-at") == 0 && i + 1 < argc) {
                 const wchar_t* v = argv[++i];
                 while (v && *v) {
@@ -4054,6 +4156,9 @@ static int RunShotMode() {
                 o.shotFps = f < 30 ? 30 : (f > 240 ? 240 : f);
             } else if (wcscmp(argv[i], L"--test-device-lost") == 0 && i + 1 < argc) {
                 o.devLostAt = (float)_wtof(argv[++i]);
+            } else if (wcscmp(argv[i], L"--snapshot-at") == 0 && i + 2 < argc) {
+                o.snapAt = (float)_wtof(argv[++i]);
+                o.snapPng = argv[++i];
             } else if (wcscmp(argv[i], L"--test-murk-async") == 0) {
                 o.murkAsync = true;
             } else if (wcscmp(argv[i], L"--photos") == 0 && i + 1 < argc) {
@@ -4311,6 +4416,30 @@ static int RunShotMode() {
     double ftLoadT0 = 0.0;
     std::vector<std::string> ftReports;
 
+    // --snapshot-at (ui3 B5): after each frame, note the frame the request was recorded in and write the
+    // picture once TakeSnapshot delivers it (its frame's fence done). Reads only; the frames are untouched.
+    // lastFrame = the index of the frame rendered last (it ends at t = (lastFrame + 1) / fps)
+    auto snapPoll = [&](long long lastFrame) {
+        if (!o.snapAsked || o.snapDone) return;
+        if (!o.snapRecorded && !renderer.SnapshotRequested()) { o.snapRecorded = true; o.snapRecFrame = lastFrame; }
+        std::vector<uint8_t> px;
+        int sw = 0, sh = 0;
+        if (!renderer.TakeSnapshot(px, sw, sh)) return;
+        o.snapDone = true;
+        std::vector<uint8_t> bgr((size_t)sw * sh * 3);
+        for (size_t p = 0; p < (size_t)sw * sh; p++) {
+            bgr[p * 3 + 0] = px[p * 4 + 2];
+            bgr[p * 3 + 1] = px[p * 4 + 1];
+            bgr[p * 3 + 2] = px[p * 4 + 0];
+        }
+        EnsureParentDir(o.snapPng.c_str());
+        const bool ok = WritePng(o.snapPng.c_str(), bgr, sw, sh);
+        ShotLog("[snapshot] t=%.3fs %dx%d %s %ls (asked in frame %lld, recorded in frame %lld = t %.3fs, "
+                "delivered after frame %lld; CPU %.1f ms)\n",
+                (o.snapRecFrame + 1) / hzD, sw, sh, ok ? "written" : "NOT written (WIC failed)", o.snapPng.c_str(),
+                o.snapAskFrame, o.snapRecFrame, (o.snapRecFrame + 1) / hzD, lastFrame, renderer.SnapshotCpuMs());
+    };
+
     std::vector<float> pixels;
     for (int s = 0; s < o.seriesCount; s++) {
         const double target = o.delaySec + (double)s * o.seriesInterval;
@@ -4371,11 +4500,61 @@ static int RunShotMode() {
                 ShotLog("[devlost] removed at t=%.2fs (frame %lld): %s\n", frames / hzF, frames,
                         removed ? "ID3D12Device5::RemoveDevice()" : "FAILED, no ID3D12Device5");
             }
+            if (o.snapAt >= 0.0f && !o.snapAsked && (frames + 1) / hzD >= (double)o.snapAt) {   // --snapshot-at (ui3 B5)
+                renderer.RequestSnapshot();
+                o.snapAsked = true;
+                o.snapAskFrame = frames;
+                ShotLog("[snapshot] --snapshot-at %.3f: asked before frame %lld (it ends at t=%.3fs)\n",
+                        o.snapAt, frames, (frames + 1) / hzD);
+            }
             if (o.drop && !o.dropFired && frames / hzF >= o.dropAt) {
                 renderer.QueueDrop(o.dropX, o.dropY, o.dropVy);
                 o.dropFired = true;
                 ShotLog("[shot] drop injected at t=%.2fs (%.0f,%.0f) vy=%.0f\n",
                         frames / hzF, o.dropX, o.dropY, o.dropVy);
+            }
+            while (o.shotQueueDone < o.shotQueue.size() && frames / hzF >= o.shotQueue[o.shotQueueDone].t) {
+                const auto& q = o.shotQueue[o.shotQueueDone++];
+                int qi = -1;
+                for (int k = 0; k < DirectorLookCount(); k++) if (_wcsicmp(DirectorLookName(k).c_str(), q.combo.c_str()) == 0) qi = k;
+                ShotLog("[shot] --shot-queue %.2f: show next %ls %s%s\n", q.t, q.combo.c_str(), q.mode ? "darkroom" : "vivid",
+                        qi < 0 ? " (NO SUCH COMBO)" : "");
+                if (qi >= 0) DirectorQueueLook(qi, q.mode);
+            }
+            if (o.hideAt >= 0.0f && frames / hzF >= o.hideAt) {   // ui3 --shot-hide: inert without the flag
+                int hi = -1;
+                for (int k = 0; k < DirectorLookCount(); k++) if (_wcsicmp(DirectorLookName(k).c_str(), o.hideCombo.c_str()) == 0) hi = k;
+                ShotLog("[shot] --shot-hide %.2f: remove %ls%s (%s)\n", o.hideAt, o.hideCombo.c_str(), hi < 0 ? " (NO SUCH COMBO)" : "",
+                        DirectorStatusLine().c_str());
+                if (hi >= 0) DirectorHideCombo(hi);
+                o.hideAt = -1.0f;
+            }
+            if (o.keepAt >= 0.0f || o.visitAt >= 0.0f || o.keepSec > 0.0f || o.visitSec > 0.0f) {   // ui3, inert without the flags
+                const float tNow = frames / hzF;
+                CycleHoldSetClock(tNow);
+                if (o.keepAt >= 0.0f && tNow >= o.keepAt) {
+                    ShotLog("[keep] --cycle-keep-at %.2f: Keep this for %.0f s (cycle %s, colour director %s)\n", o.keepAt,
+                            o.keepSec, CycleState().phase != CYCLE_OFF ? "on" : "off", DirectorActive() ? "on" : "off");
+                    CycleKeepThis(o.keepSec);
+                    o.keepAt = -1.0f;
+                }
+                if (o.visitGuest >= 0 && o.visitAt >= 0.0f && tNow >= o.visitAt) {   // ui3: the guest visit (Ink / Fluid)
+                    std::string why;
+                    const std::wstring preset = CycleGuestPreset(o.visitGuest, &why);
+                    ShotLog("[visit] --cycle-visit-at %.2f: visit %s for %.0f s: %d stages before (%d listed), preset %ls\n",
+                            o.visitAt, o.visitGuest == 0 ? "Ink" : "Fluid", o.visitSec, (int)CycleGet().stages.size(),
+                            CycleListedCount(), preset.empty() ? L"(none)" : preset.c_str());
+                    if (preset.empty()) ShotLog("[visit] --cycle-visit-at: no preset (%s)\n", why.c_str());
+                    else if (!CycleVisitGuest(preset, o.visitSec)) ShotLog("[visit] --cycle-visit-at: not taken\n");
+                    else ShotLog("[visit] --cycle-visit-at: guest stage %d, %d stages now\n", CycleGuestStage() + 1,
+                                 (int)CycleGet().stages.size());
+                    o.visitAt = -1.0f;
+                }
+                if (o.visitAt >= 0.0f && tNow >= o.visitAt) {
+                    ShotLog("[visit] --cycle-visit-at %.2f: visit stage %d for %.0f s\n", o.visitAt, o.visitStage, o.visitSec);
+                    if (!CycleVisit(o.visitStage - 1, o.visitSec)) ShotLog("[visit] --cycle-visit-at: not taken\n");
+                    o.visitAt = -1.0f;
+                }
             }
             if (cycling) {
                 if (shotCtl) {
@@ -4496,6 +4675,7 @@ static int RunShotMode() {
                 ftPos = (ftPos + 1) % ftRing.size();
                 if (ftFill < ftRing.size()) ftFill++;
             }
+            snapPoll(frames);                // --snapshot-at (ui3 B5); nothing without the flag
             frames++;
             // --timings: only the last 10 s before each capture are averaged
             // (the population and the droplets have settled by then)
@@ -4562,6 +4742,7 @@ static int RunShotMode() {
             CoUninitialize();
             return 4;
         }
+        snapPoll(frames - 1);   // --snapshot-at: CaptureOffscreen waited for the GPU, so a copy of the last frame is done
         std::wstring shotStem = stem;
         if (o.seriesCount > 1) {
             wchar_t suffix[32];
@@ -4658,6 +4839,10 @@ static int RunShotMode() {
         }
     }
 
+    if (o.snapAt >= 0.0f && !o.snapDone)
+        ShotLog("[snapshot] --snapshot-at %.3f: NOT written (%s)\n", o.snapAt,
+                !o.snapAsked ? "t is past the run's end" : !o.snapRecorded ? "no frame drew the display after the ask"
+                                                                          : "the copy never landed");
     ShotLog("[shot] done: %lld frames simulated in %.1f s wall\n",
             frames, (GetTickCount() - wallStart) / 1000.0);
     g_renderer = nullptr;
@@ -4679,6 +4864,10 @@ static bool UiShotModeRequested() {
     bool found = false;
     for (int i = 1; i < argc && !found; i++)
         if (wcscmp(argv[i], L"--ui-shot") == 0 || wcscmp(argv[i], L"--ui-dump") == 0) found = true;
+    // ui3 --ui-live: the real Settings window on the same scripted, read-only state (no renderer, no WorkerW, no
+    // tray, no mutex, nothing written); it exits when the window is closed
+    for (int i = 1; i < argc && !found; i++)
+        if (wcscmp(argv[i], L"--ui-live") == 0) found = true;
     LocalFree(argv);
     return found;
 }
@@ -4690,10 +4879,12 @@ static int RunUiShotMode() {
     std::wstring ini;
     bool hdrOn = false;
     float panelMax = 1000.0f;
+    bool uiLive = false;               // ui3 --ui-live: a real window, so per-monitor DPI as the app has it
     for (int i = 1; i < argc; i++) {
         if (wcscmp(argv[i], L"--ini") == 0 && i + 1 < argc) ini = argv[++i];
         else if (wcscmp(argv[i], L"--hdr") == 0 && i + 1 < argc) hdrOn = _wcsicmp(argv[++i], L"on") == 0;
         else if (wcscmp(argv[i], L"--panel-max") == 0 && i + 1 < argc) panelMax = (float)_wtof(argv[++i]);
+        else if (wcscmp(argv[i], L"--ui-live") == 0) uiLive = true;
     }
     g_configReadOnly = true;
     InitSettingsPath();
@@ -4712,6 +4903,7 @@ static int RunUiShotMode() {
         LocalFree(argv);
         return 3;
     }
+    if (uiLive) SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
     g_hdrActive = hdrOn;
     g_maxNits = panelMax;
     FluidConfig cfg;
@@ -4757,10 +4949,397 @@ static int CycleCliCommand() {
     return 0;
 }
 
+// ---------------------------------------------------------------------------
+// --demo: a TEST look, live, in its own full-screen window (user 2026-11-21:
+// "can you make a demo function maybe? So i get an app popupp and it shows
+// the thing on my screen?"). What a screenshot cannot show: the true size,
+// the motion and the real HDR brightness of a look that is not live.
+//
+//   FluidWallpaper.exe --demo --ini <file> [--demo-label "text"] [--seed N]
+//                      [--shot-time0 S]
+//
+// Like --shot it returns before the single-instance mutex and never disturbs a
+// running wallpaper: the config is read-only (no ini, mood or autostart write,
+// and WpLog is silent, so the live log stays the live copy's), there is no
+// tray window (the watchers find the LIVE tray by its class), no WorkerW, no
+// hotkey. Unlike --shot it has a real swap chain on a borderless window over
+// the primary monitor, runs in real time and reads the real display's HDR
+// state. The window's class is not one IsShellOrOwnWindow() knows, so the live
+// wallpaper sees an ordinary full-screen app in front and pauses itself: there
+// is still one render at a time. The demo stops drawing while it is not the
+// foreground window, for the same reason.
+// Keys: Esc / Q = close (exit code 0); 1 / 2 = close with exit code 11 / 12
+// (the launcher, band\tools\demo.ps1, starts the other config); H = the label.
+// The game guard and gpu.lock are the launcher's job.
+// ---------------------------------------------------------------------------
+static bool DemoModeRequested() {
+    int argc = 0;
+    wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+    bool found = false;
+    for (int i = 1; i < argc && !found; i++)
+        if (wcscmp(argv[i], L"--demo") == 0) found = true;
+    LocalFree(argv);
+    return found;
+}
+
+static std::wstring g_demoLabel;
+static HFONT        g_demoFont = nullptr;
+static bool         g_demoQuit = false;
+static int          g_demoExit = 0;
+static bool         g_demoLabelToggle = false;
+static bool         g_demoCamToggle = false;                 // F
+static float        g_demoCamPitch = 0.0f, g_demoCamFov = 0.0f, g_demoCamHeight = 0.0f;   // pending key steps
+static bool         g_demoCamReliefToggle = false;           // R
+static float        g_demoCamRelief = 0.0f;                  // Home / End
+
+static LRESULT CALLBACK DemoLabelWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    if (m == WM_PAINT) {
+        PAINTSTRUCT ps;
+        HDC dc = BeginPaint(h, &ps);
+        RECT rc;
+        GetClientRect(h, &rc);
+        FillRect(dc, &rc, (HBRUSH)GetStockObject(BLACK_BRUSH));
+        HGDIOBJ old = g_demoFont ? SelectObject(dc, g_demoFont) : nullptr;
+        SetBkMode(dc, TRANSPARENT);
+        SetTextColor(dc, RGB(255, 255, 255));
+        InflateRect(&rc, -18, -12);
+        DrawTextW(dc, g_demoLabel.c_str(), -1, &rc, DT_LEFT | DT_TOP | DT_NOPREFIX);
+        if (old) SelectObject(dc, old);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    if (m == WM_NCHITTEST) return HTTRANSPARENT;
+    return DefWindowProcW(h, m, w, l);
+}
+
+static LRESULT CALLBACK DemoWndProc(HWND h, UINT m, WPARAM w, LPARAM l) {
+    switch (m) {
+    case WM_KEYDOWN:
+        // never DestroyWindow here: the renderer's swap chain is on this
+        // window, so the loop ends first, shuts the renderer down, then destroys
+        if (w == VK_ESCAPE || w == 'Q')        { g_demoExit = 0;  g_demoQuit = true; }
+        else if (w == '1' || w == VK_NUMPAD1)  { g_demoExit = 11; g_demoQuit = true; }
+        else if (w == '2' || w == VK_NUMPAD2)  { g_demoExit = 12; g_demoQuit = true; }
+        else if (w == 'H')                     g_demoLabelToggle = true;
+        // the fish-eye camera, live (no restart, the same picture): F on / off, arrows = tilt and
+        // lens width, PgUp / PgDn = height over the surface. Applied in the loop.
+        else if (w == 'F')                     g_demoCamToggle = true;
+        else if (w == VK_UP)                   g_demoCamPitch += 2.0f;
+        else if (w == VK_DOWN)                 g_demoCamPitch -= 2.0f;
+        else if (w == VK_RIGHT)                g_demoCamFov += 5.0f;
+        else if (w == VK_LEFT)                 g_demoCamFov -= 5.0f;
+        else if (w == VK_PRIOR)                g_demoCamHeight += 1.0f;
+        else if (w == VK_NEXT)                 g_demoCamHeight -= 1.0f;
+        else if (w == 'R')                     g_demoCamReliefToggle = true;   // the domes on / off (flat v1)
+        else if (w == VK_HOME)                 g_demoCamRelief += 0.1f;        // taller / lower domes
+        else if (w == VK_END)                  g_demoCamRelief -= 0.1f;
+        return 0;
+    case WM_CLOSE:
+        g_demoExit = 0; g_demoQuit = true;
+        return 0;
+    case WM_ERASEBKGND:
+        return 1;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+static int RunDemoMode() {
+    setvbuf(stdout, nullptr, _IONBF, 0);
+    std::wstring ini;
+    unsigned seed = 1234;          // the same start picture for every config (0 = a new one each run)
+    double time0 = 0.0;
+    float  prewarm = 0.0f;         // --demo-prewarm S: the first S seconds of the picture run fast-forward
+    {
+        int argc = 0;
+        wchar_t** argv = CommandLineToArgvW(GetCommandLineW(), &argc);
+        for (int i = 1; i < argc; i++) {
+            if (wcscmp(argv[i], L"--ini") == 0 && i + 1 < argc)              ini = argv[++i];
+            else if (wcscmp(argv[i], L"--demo-label") == 0 && i + 1 < argc)  g_demoLabel = argv[++i];
+            else if (wcscmp(argv[i], L"--seed") == 0 && i + 1 < argc)        seed = (unsigned)_wtoi(argv[++i]);
+            else if (wcscmp(argv[i], L"--shot-time0") == 0 && i + 1 < argc)  time0 = _wtof(argv[++i]);
+            else if (wcscmp(argv[i], L"--demo-prewarm") == 0 && i + 1 < argc) prewarm = (float)_wtof(argv[++i]);
+        }
+        LocalFree(argv);
+    }
+    if (ini.empty() || GetFileAttributesW(ini.c_str()) == INVALID_FILE_ATTRIBUTES) {
+        ShotLog("[demo] ERROR: --demo needs --ini <an existing file>\n");
+        MessageBoxW(nullptr, L"--demo needs --ini <an existing config file>.", L"Fluid Wallpaper demo", MB_ICONERROR);
+        return 2;
+    }
+    for (size_t k = 0; (k = g_demoLabel.find(L"\\n", k)) != std::wstring::npos; ) g_demoLabel.replace(k, 2, L"\n");
+
+    // Config: read-only for the whole run, exactly as --shot.
+    g_configReadOnly = true;
+    InitSettingsPath();
+    wcscpy_s(g_configIniPath, MAX_PATH, ini.c_str());
+    if (FAILED(CoInitializeEx(nullptr, COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE))) {
+        ShotLog("[demo] ERROR: CoInitializeEx failed\n");
+        return 3;
+    }
+    SetProcessDpiAwarenessContext(DPI_AWARENESS_CONTEXT_PER_MONITOR_AWARE_V2);
+    ShotLog("[demo] ini=%ls seed=%u time0=%.0f\n", g_configIniPath, seed, time0);
+
+    FluidConfig cfg;
+    LoadSettings();          // shell globals: peak_nits, gamut (from the demo ini)
+    LoadFullConfig(cfg);
+    EnsureBuiltinPresets();  // no-op while read-only
+    CycleLoad(g_configIniPath);
+    CycleOverride(-1.0f, -1, seed, -1, false);
+    ClocksLoad(g_configIniPath);
+    ClocksSeed(CycleSeed());
+    DirectorSeed(CycleSeed());
+    CycleBoot(cfg);
+
+    const int width  = GetSystemMetrics(SM_CXSCREEN);
+    const int height = GetSystemMetrics(SM_CYSCREEN);
+    HINSTANCE inst = GetModuleHandleW(nullptr);
+    WNDCLASSW wc = {};
+    wc.lpfnWndProc = DemoWndProc;
+    wc.hInstance = inst;
+    wc.lpszClassName = L"FluidWallpaperDemo";      // never a class IsShellOrOwnWindow() or a watcher knows
+    wc.hCursor = LoadCursorW(nullptr, IDC_ARROW);
+    wc.hbrBackground = (HBRUSH)GetStockObject(BLACK_BRUSH);
+    RegisterClassW(&wc);
+    HWND hwnd = CreateWindowExW(WS_EX_APPWINDOW, wc.lpszClassName, L"Fluid Wallpaper demo",
+                                WS_POPUP, 0, 0, width, height, nullptr, nullptr, inst, nullptr);
+    if (!hwnd) {
+        ShotLog("[demo] ERROR: CreateWindowExW failed (%lu)\n", GetLastError());
+        CoUninitialize();
+        return 3;
+    }
+    ShowWindow(hwnd, SW_SHOW);
+    if (!SetForegroundWindow(hwnd) || GetForegroundWindow() != hwnd) {
+        // Windows refuses the foreground to a process that did not get the last input (a launcher
+        // script started us). The user asked for this window: an Alt tap lifts the lock.
+        keybd_event(VK_MENU, 0, 0, 0);
+        keybd_event(VK_MENU, 0, KEYEVENTF_KEYUP, 0);
+        SetForegroundWindow(hwnd);
+    }
+    g_monitor = MonitorFromWindow(hwnd, MONITOR_DEFAULTTOPRIMARY);
+
+    if (seed) FluidRenderer::SetRandomSeed(seed);
+    FluidRenderer renderer;
+    renderer.SetSurviveDeviceLoss(true);           // a lost device ends the demo below instead of a fatal box
+    if (!renderer.TryInit(hwnd, width, height, cfg)) {
+        ShotLog("[demo] ERROR: the swap chain was refused (is a full-screen app holding the screen?)\n");
+        DestroyWindow(hwnd);
+        MessageBoxW(nullptr, L"The demo could not get the screen (is a full-screen app in front?).",
+                    L"Fluid Wallpaper demo", MB_ICONERROR);
+        CoUninitialize();
+        return 4;
+    }
+    if (time0 > 0.0) {
+        renderer.SetClock(time0);
+        DirectorFastForward((float)time0);
+    }
+    g_renderer = &renderer;
+    renderer.SetCoverageWanted(CycleCoverageWanted());
+    InitSettingsModel(renderer);
+
+    // the real display's HDR state, as the live path resolves it at startup
+    g_hdrActive = QueryHDR(g_monitor, &g_maxNits, g_panelPrim, &g_panelPrimValid);
+    g_sdrWhiteNits = GetSdrWhiteNits(g_monitor);
+    g_sdrManaged = !g_hdrActive && QueryColorMode(g_monitor) == 1;
+    renderer.SetSdrGamut(g_sdrGamutMode, g_panelPrim, g_panelPrimValid, g_sdrManaged);
+    ShotLog("[demo] %dx%d, HDR %s (max %.0f nits, SDR white %.0f nits), peak_nits=%.0f, gamut=%d\n", width, height,
+            g_hdrActive ? "ON" : "OFF", g_maxNits, g_sdrWhiteNits, g_hdrPeakNits, g_gamutMode);
+
+    // the label: a small always-on-top strip (GDI cannot draw on a flip swap chain's window)
+    HWND labelWnd = nullptr;
+    if (!g_demoLabel.empty()) {
+        const UINT dpi = GetDpiForWindow(hwnd);
+        g_demoFont = CreateFontW(-MulDiv(15, (int)dpi, 72), 0, 0, 0, FW_SEMIBOLD, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
+                                 OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY, DEFAULT_PITCH, L"Segoe UI");
+        RECT tr = { 0, 0, width / 2, 0 };
+        HDC sdc = GetDC(nullptr);
+        HGDIOBJ old = SelectObject(sdc, g_demoFont);
+        DrawTextW(sdc, g_demoLabel.c_str(), -1, &tr, DT_LEFT | DT_TOP | DT_NOPREFIX | DT_CALCRECT);
+        SelectObject(sdc, old);
+        ReleaseDC(nullptr, sdc);
+        WNDCLASSW lc = {};
+        lc.lpfnWndProc = DemoLabelWndProc;
+        lc.hInstance = inst;
+        lc.lpszClassName = L"FluidWallpaperDemoLabel";
+        RegisterClassW(&lc);
+        labelWnd = CreateWindowExW(WS_EX_TOPMOST | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW | WS_EX_LAYERED,
+                                   lc.lpszClassName, L"", WS_POPUP, 28, 28, (tr.right - tr.left) + 36,
+                                   (tr.bottom - tr.top) + 24, hwnd, nullptr, inst, nullptr);
+        if (labelWnd) {
+            SetLayeredWindowAttributes(labelWnd, 0, 215, LWA_ALPHA);
+            ShowWindow(labelWnd, SW_SHOWNOACTIVATE);
+        }
+    }
+    bool labelShown = labelWnd != nullptr;
+    ULONGLONG labelUntil = GetTickCount64() + 12000;     // then it gets out of the picture's way; H brings it back
+
+    LARGE_INTEGER freq, prev, now;
+    QueryPerformanceFrequency(&freq);
+    QueryPerformanceCounter(&prev);
+    const char* why = "closed by the user";
+    MSG msg = {};
+    bool run = true;
+    int  demoModeBefore = 0;                                   // what F goes back to
+    float demoReliefBefore = 0.70f;                            // what R goes back to
+    bool demoCamPlaced = (renderer.Config().mirror.mode == 5); // the ini placed the camera itself
+    // --demo-prewarm S (the user on the first demo, which flipped after ~8 s a view: "doesnt really look
+    // different"; a cold start has no ink in the water, no settled droplets, nothing to compare yet): the
+    // first S seconds of the picture run as fast as the GPU goes, sim-only steps of 1/60 s with every 12th
+    // one a shown frame, so it is watched fast-forwarding instead of a black wait. The keys work meanwhile.
+    if (prewarm > 0.5f) {
+        const float pdt = 1.0f / 60.0f;
+        const int steps = (int)(prewarm * 60.0f);
+        const ULONGLONG w0 = GetTickCount64();
+        int done = 0;
+        for (; done < steps && run && !g_demoQuit; done++) {
+            if ((done % 12) == 0) {
+                while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                    if (msg.message == WM_QUIT) run = false;
+                    TranslateMessage(&msg);
+                    DispatchMessageW(&msg);
+                }
+                if (renderer.DeviceLost() || renderer.PresentBroken()) break;
+            }
+            const CycleFrame cf = CycleTick(renderer, pdt);
+            ClocksTick(renderer, pdt);
+            DirectorTick(renderer, pdt);
+            if ((done % 12) == 11) {
+                const float peak = g_hdrPeakNits < 0.0f ? g_maxNits : g_hdrPeakNits;
+                renderer.SetHdrOptions(peak, g_gamutMode);
+                renderer.SetFade(cf.fade);
+                renderer.SetBlackOut(cf.black);
+                renderer.Frame(pdt, g_hdrActive ? (g_sdrWhiteNits / 80.0f) : 1.0f, g_hdrActive, FrameInput{});
+            } else {
+                renderer.SimOnlyStep(pdt);
+            }
+        }
+        ShotLog("[demo] prewarm: %.0f s of picture (%d steps) in %.1f s\n", done / 60.0f, done,
+                (GetTickCount64() - w0) / 1000.0);
+        labelUntil = GetTickCount64() + 12000;
+        QueryPerformanceCounter(&prev);
+    }
+    while (run) {
+        while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+            if (msg.message == WM_QUIT) run = false;
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        if (!run || g_demoQuit) break;
+        if (renderer.DeviceLost())    { why = "the GPU device was lost"; break; }
+        if (renderer.PresentBroken()) { why = "the window was lost"; break; }
+        if (labelWnd) {
+            if (g_demoLabelToggle) {
+                g_demoLabelToggle = false;
+                labelShown = !labelShown;
+                labelUntil = labelShown ? GetTickCount64() + 12000 : 0;
+                ShowWindow(labelWnd, labelShown ? SW_SHOWNOACTIVATE : SW_HIDE);
+            } else if (labelShown && GetTickCount64() > labelUntil) {
+                labelShown = false;
+                ShowWindow(labelWnd, SW_HIDE);
+            }
+        }
+        // the fish-eye camera's keys ([mirror] mode 5): uniforms only, so they take effect on the next frame
+        if (g_demoCamToggle || g_demoCamPitch != 0.0f || g_demoCamFov != 0.0f || g_demoCamHeight != 0.0f
+            || g_demoCamReliefToggle || g_demoCamRelief != 0.0f) {
+            MirrorConfig& mr = renderer.Config().mirror;
+            if (g_demoCamToggle) {
+                if (mr.mode == 5) mr.mode = demoModeBefore;
+                else {
+                    demoModeBefore = mr.mode;
+                    mr.mode = 5;
+                    if (!demoCamPlaced) { mr.centerX = 0.5f; mr.centerY = 1.0f; demoCamPlaced = true; }
+                }
+            }
+            if (mr.mode == 5) {
+                mr.camPitch  = fminf(fmaxf(mr.camPitch + g_demoCamPitch, 5.0f), 90.0f);
+                mr.camFov    = fminf(fmaxf(mr.camFov + g_demoCamFov, 40.0f), 178.0f);
+                mr.camHeight = fminf(fmaxf(mr.camHeight * powf(1.08f, g_demoCamHeight), 0.03f), 3.0f);
+                if (g_demoCamReliefToggle) {
+                    if (mr.camRelief > 0.001f) { demoReliefBefore = mr.camRelief; mr.camRelief = 0.0f; }
+                    else mr.camRelief = demoReliefBefore;
+                }
+                if (g_demoCamRelief != 0.0f && mr.camRelief > 0.001f)
+                    mr.camRelief = fminf(fmaxf(mr.camRelief + g_demoCamRelief, 0.1f), 1.5f);
+            }
+            g_demoCamReliefToggle = false; g_demoCamRelief = 0.0f;
+            g_demoCamToggle = false;
+            g_demoCamPitch = g_demoCamFov = g_demoCamHeight = 0.0f;
+        }
+        // not in front = a trickle of 2 frames a second (the window keeps a picture instead of going
+        // black): the wallpaper behind is drawing again then, and two full renders at once are what
+        // the GPU lock exists to prevent
+        if (GetForegroundWindow() != hwnd) {
+            QueryPerformanceCounter(&now);
+            if ((double)(now.QuadPart - prev.QuadPart) / (double)freq.QuadPart < 0.5) {
+                MsgWaitForMultipleObjects(0, nullptr, FALSE, 50, QS_ALLINPUT);
+                continue;
+            }
+        }
+        QueryPerformanceCounter(&now);
+        const float dt = (float)((double)(now.QuadPart - prev.QuadPart) / (double)freq.QuadPart);
+        const float kMaxStep = 1.0f / 30.0f;             // a stall must not become a jump (as the live loop)
+        const float simDt = (dt < kMaxStep) ? dt : kMaxStep;
+        float fpsLim = renderer.Config().fpsLimit;
+        if (fpsLim < 10.0f) fpsLim = 10.0f;
+        const float refreshHz = MonitorRefreshHz();
+        if (fpsLim < refreshHz - 1.0f) {
+            if (dt < 1.0f / (fpsLim + 2.0f)) {
+                MsgWaitForMultipleObjects(0, nullptr, FALSE, 2, QS_ALLINPUT);
+                continue;
+            }
+        } else if (dt < 1.0f / (refreshHz * 3.0f)) {
+            MsgWaitForMultipleObjects(0, nullptr, FALSE, 1, QS_ALLINPUT);
+            continue;
+        }
+        prev = now;
+
+        FrameInput fin;                                  // the pointer stirs the picture as on the desktop
+        {
+            static POINT prevCursor = { LONG_MIN, LONG_MIN };
+            POINT cp;
+            GetCursorPos(&cp);
+            if (prevCursor.x != LONG_MIN && (cp.x != prevCursor.x || cp.y != prevCursor.y)) {
+                fin.mouseMoved = true;
+                fin.mouseDx = (float)(cp.x - prevCursor.x) * 5.0f;
+                fin.mouseDy = (float)(cp.y - prevCursor.y) * 5.0f;
+                fin.userInteracted = true;
+            }
+            if (GetAsyncKeyState(VK_LBUTTON) & 0x8000) { fin.mouseDown = true; fin.userInteracted = true; }
+            fin.mouseX = (float)cp.x;
+            fin.mouseY = (float)cp.y;
+            prevCursor = cp;
+        }
+        const float sdrScale = g_hdrActive ? (g_sdrWhiteNits / 80.0f) : 1.0f;
+        const CycleFrame cf = CycleTick(renderer, simDt);
+        ClocksTick(renderer, simDt);
+        DirectorTick(renderer, simDt);
+        const float peak = g_hdrPeakNits < 0.0f ? g_maxNits : g_hdrPeakNits;
+        renderer.SetHdrOptions(peak, g_gamutMode);
+        for (int k = 0; k < cf.extraSteps; k++) renderer.SimOnlyStep(cf.stepDt);
+        renderer.SetFade(cf.fade);
+        renderer.SetBlackOut(cf.black);
+        renderer.Frame(simDt, sdrScale, g_hdrActive, fin);
+    }
+    {
+        const MirrorConfig& mr = renderer.Config().mirror;
+        ShotLog("[demo] camera at the end: mode %d, cam_pitch %.1f, cam_fov %.1f, cam_height %.3f, cam_relief %.2f, centre %.2f %.2f\n",
+                mr.mode, mr.camPitch, mr.camFov, mr.camHeight, mr.camRelief, mr.centerX, mr.centerY);
+    }
+    ShotLog("[demo] end: %s, exit code %d\n", why, g_demoExit);
+    g_renderer = nullptr;
+    renderer.Shutdown();
+    if (labelWnd) DestroyWindow(labelWnd);
+    DestroyWindow(hwnd);
+    if (g_demoFont) DeleteObject(g_demoFont);
+    CoUninitialize();
+    return g_demoExit;
+}
+
 int WINAPI wWinMain(HINSTANCE, HINSTANCE, PWSTR, int) {
     // Headless capture: no window, no WorkerW, no tray, no single-instance
     // handshake (a running wallpaper must not be disturbed), no config writes.
     if (ShotModeRequested()) return RunShotMode();
+    // --demo: a test look live in its own window; the same guarantees (see RunDemoMode)
+    if (DemoModeRequested()) return RunDemoMode();
     {
         const int rc = CycleCliCommand();
         if (rc >= 0) return rc;

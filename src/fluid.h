@@ -494,6 +494,22 @@ struct LiquidAcidConfig {
 
     float dropletRingRMul   = 1.0f;  // 1..6              droplet_ring_r_mul
     float dropletRingBigFrac= 0.0f;  // 0..1           droplet_ring_big_frac
+    // --- MEDIUM BLACK DROPLETS (2026-11-21, TEST) -------------------------
+    // The user: "make the black oil have more in between. Currently there's a
+    // lot of small and a lot of large", and on HOLE blobs as the in-between
+    // size: "those blobs in B look mad werid and not circular". So the medium
+    // size comes from the droplets, which are round: a share of the NEW solid
+    // droplets in the film is born medium (the big hollow bubbles' mechanism:
+    // registered in every cell its support covers). A medium droplet never
+    // coalesces by touch: a small one whose centre gets under its disc pours
+    // into it, every other neighbour is held off its rim (no attraction), so
+    // nothing glues a knob onto the circle; and it keeps more than its whole
+    // radius inside the film, so it never bites the film's outline.
+    //   droplet_big_frac   0 = today. Share of new solid film droplets.
+    //   droplet_big_r_mul  1 = today. Radius drawn between 1.25x and this
+    //                      multiple of droplet_r_max (weighted to the small end).
+    float dropletBigFrac    = 0.0f;  // 0..0.2              droplet_big_frac
+    float dropletBigRMul    = 1.0f;  // 1..6               droplet_big_r_mul
 
     // --- CONSERVATION OF MASS (brief S, 2026-09-18) ---------------------
     // "matter cannot be created or destroyed": nothing may appear at a
@@ -810,6 +826,24 @@ struct LiquidAcidConfig {
     //       seam under 1 % of the screen height is untouched. Quarter steps, a compile-time define (SEAM_STRETCH,
     //       fluid.cpp SpecTintDefs). 0 = today (no define, the same shader).
     float filmHue2SeamStretch = 0.0f;   // 0..3   film_hue2_seam_stretch
+    //   film_hue2_leak (user 2026-11-19, with the stretch at 4.5 live: "this sort of thing where it's all blurry is
+    //       not great", "I want most of the banding to be tighter, then now, still wider then it was before the
+    //       change", "it should look like a colored thing, and then a leak at the edge, that could go like idk a
+    //       third of the screen", and a graph of 1 / x for the shape). REPLACES the stretch while it is above 0:
+    //       the seam itself is the band of before x film_hue2_leak_core, and the patch's colour LEAKS out of its
+    //       edge into the film: `leak` of the hue at the edge, fading as (1 - d / reach)^3 over
+    //       film_hue2_leak_reach units of the mix field (steep at the edge, a long tail). A rule on the FIELD, so
+    //       it is short where the field is steep and long where it is shallow, with no gradient in it (the
+    //       stretch's per-pixel gradient draws the 20x12 grid as crosses once it is not at its cap). Defines
+    //       (SEAM_LEAK / _R in twentieths, _C in quarters). 0 = today (no define, the same shader).
+    float filmHue2Leak      = 0.0f;     // 0..1     film_hue2_leak
+    float filmHue2LeakReach = 0.35f;    // 0.05..1.2 film_hue2_leak_reach
+    float filmHue2LeakCore  = 1.5f;     // 0.25..6  film_hue2_leak_core
+    //   film_hue2_leak_in (the user on the first leak sheets, a valley between two orange blobs circled: "Strong
+    //       isn't strong enough. Where the blue is, I want it to have the red color that the live version has"):
+    //       the same leak the OTHER way, the film's colour into the patch from the seam's film-side edge, so a
+    //       shallow valley inside a patch shows the in-between colour again. 0 = one-sided. SEAM_LEAK_I, twentieths.
+    float filmHue2LeakIn    = 0.0f;     // 0..1.2   film_hue2_leak_in
     float crustHueMix   = 1.0f;   // 0..1        crust_hue_mix
     //   film_hue2_wobble        the contrast hue is not NAILED to an angle:
     //                           it wanders a few degrees either side of it,
@@ -1578,6 +1612,17 @@ struct InkConfig {
     // 1 blends hue/sat/value instead (short way round the wheel), so every
     // intermediate is as saturated as the two anchors.       tint_hue_blend
     float tintHueBlend = 0.0f;
+    // INK INSIDE THE BLACK OIL (2026-11-21 ag-ink, TEST; liquid_acid with
+    // ink_mode = water only). black_only = 1: the ink is drawn ONLY inside
+    // the black masses; the film, its transparency, edges, halos and the
+    // droplet holes are computed as if the water held no ink, so the film's
+    // colours and shapes stay today's. 0 = today (the ink shows through the
+    // film and summons halos at its edges).                     black_only
+    int   blackOnly    = 0;
+    // With black_only: 0 = the pale tint_thin / tint_thick ink; 1 = the ink
+    // takes the FILM's colour at that spot (its hue and chroma, the ink's own
+    // level), the colour on screen bleeding into the black.     film_colour
+    float filmColour   = 0.0f;
 };
 
 // ---------------------------------------------------------------------------
@@ -1626,6 +1671,42 @@ struct DropConfig {
     // splits the head's velocity impulse into two unequal, off-centre ones
     // around the same dye stamp. 0 = the symmetric single impulse. asymmetry
     float asymmetry   = 0.35f;
+    // INK INSIDE THE BLACK OIL (2026-11-21, TEST; user: "can you try a to
+    // write a demo for the [ink] being inside the black oil?", and on the
+    // config-only first try: "doesnt really look different"). The emitter's
+    // entry band is the top of the screen, which on the oil look is mostly
+    // under the film, and the film is drawn over the ink: almost none of it
+    // was ever seen. in_black > 0 (liquid_acid only) puts every drop where
+    // the oil field is BELOW its threshold with this much room (uv-y, e.g.
+    // 0.03), anywhere on the screen; no such place right now = no drop.
+    // 0 = today (the x / y band), and the random stream is untouched.
+    float inBlack     = 0.0f;       //                                      in_black
+    // INK RIDES WITH THE PICTURE (2026-11-21 ag-ink, TEST). The oil picture
+    // climbs at [liquid_acid] rise_speed; the dye did not, so ink dropped into
+    // a black mass slid out of its bottom within seconds and was erased under
+    // the film (oil_dye_block). ink_rise x rise_speed is a uniform upward drift
+    // of the DYE ALONE in its advection (no velocity: nothing riding the flow
+    // is pushed). 1 = the ink keeps pace with the masses. 0 = today. ink_rise
+    float inkRise     = 0.0f;
+    // The drops' currents also carry the film: the blobs, the droplets and
+    // the film's hue field all ride the sim's velocity (its 64x36 CPU copy),
+    // so every drop re-routes the whole picture (by 195 s a different
+    // composition). push_film = 0 keeps that CPU copy at rest. MEASURED
+    // (ag-ink r1): that does NOT give today's film either: the oil look has
+    // currents of its own (the oil drag's edge push), which this freezes
+    // too, so the film leaves today's path from t = 5 s. Not recommended;
+    // kept as a switch. 1 = today.                              push_film
+    bool  pushFilm    = true;
+    // Round 3 (2026-11-22, the user on the ink A/B: "b look is godod"; what was still wrong: every drop's
+    // current re-routed the whole picture, and dense ink came out a washed-out lavender):
+    //   impulse    x the velocity a drop adds (head, its two lobes, the tail's pull). 1 = today. 0 = dye only:
+    //              the velocity field is never touched, so with [ink] black_only the film is today's, bit
+    //              for bit, with or without ink.
+    //   ink_swirl  uv-y per second (0 = off, useful 0.008..0.03): the DYE alone is carried by a slow,
+    //              divergence-free noise current of its own (CSAdvectDye; no velocity field, so nothing
+    //              that rides the flow feels it). What makes a drop curl into smoke when impulse is 0.
+    float impulse     = 1.0f;       //                                      impulse
+    float inkSwirl    = 0.0f;       //                                      ink_swirl
 };
 
 // Screen mirroring / kaleidoscope ([mirror]). A pure DISPLAY-pass uv
@@ -1997,6 +2078,23 @@ struct MirrorConfig {
     float rotatePeriod = 0.0f;   // s per turn of the fold axes (mode 4; 0 = fixed)
     float drift = 0.0f;          // 0..1: slow wander of the centre (sines of time)
     float soft = 0.0f;           // uv units: rounds the fold crease off (0 = hard)
+    // mode 5 = the LOW CAMERA / FISH-EYE (2026-11-21, TEST; user, with a side
+    // sketch of an eye just above the surface looking along it: "wanna try a
+    // fish eye angle? sorta like that?"). The same display-only uv transform
+    // slot as the folds: the screen is an equidistant fish-eye lens, each
+    // pixel's ray is cut with the surface plane and the look is drawn at that
+    // point, so near things are big at the bottom and the surface shrinks to a
+    // horizon; past the tank's edge it goes on as mirrored copies. Nothing in
+    // the sim knows. center_x / center_y = the point of the surface under the
+    // camera (0.5, 1.0 = above the middle of the bottom edge).
+    float camFov    = 170.0f;    // deg across the screen DIAGONAL        cam_fov
+    float camPitch  = 35.0f;     // deg below the horizon (90 = down)     cam_pitch
+    float camHeight = 0.35f;     // above the surface, screen heights     cam_height
+    float camFade   = 0.10f;     // the last sin(elevation) fades to black cam_fade
+    // cam_relief (v2; the user on the flat v1: "Isnt it supposed to have [volume]? and depth? its 3d no?"):
+    // every solid droplet is a DOME this many radii high and the camera's ray stops at the first one it
+    // enters (shaders.h CamRelief), so near beads stand up and hide what is behind them. 0 = the flat v1.
+    float camRelief = 0.70f;     // dome height / droplet radius, 0..1.5  cam_relief
 };
 
 // Defaults mirror reference/project.json (the shipped Wallpaper Engine values),
@@ -2506,6 +2604,21 @@ public:
     static const int kAnaW = 640, kAnaH = 360;
     void EnableAnalyzer(bool on) { m_anaEnabled = on; }
     bool ReadAnalyzerFrame(std::vector<float>& outRgba);  // true if a new frame landed
+
+    // ui3 B5: the Settings window's picture of "now". RequestSnapshot() asks for ONE copy of
+    // the finished frame (after post, what is presented); the next Frame() that draws the
+    // display records it at its end into a readback buffer, in its own command list, every
+    // resource state restored (no request = not one command more). TakeSnapshot() is false
+    // until that frame's fence is done (no stall), then hands back the frame boxed down to
+    // at most kSnapMaxW x kSnapMaxH, 8-bit sRGB RGBA as the --shot SDR PNG converts it
+    // (/sdrScale, clamp 0..1, sRGB). A paused / suspended wallpaper draws nothing: the
+    // request waits. ReleaseSnapshot() (window closed) frees the readback; Shutdown() too.
+    static const int kSnapMaxW = 592, kSnapMaxH = 333;
+    void RequestSnapshot() { m_snapWanted = true; }
+    bool SnapshotRequested() const { return m_snapWanted; }
+    bool TakeSnapshot(std::vector<uint8_t>& rgba, int& w, int& h);
+    void ReleaseSnapshot();
+    float SnapshotCpuMs() const { return m_snapCpuMs; }   // the last TakeSnapshot's CPU work
     IDXGISwapChain3* SwapChain() { return m_swapChain.Get(); }
 
 private:
@@ -2604,6 +2717,7 @@ private:
                                  bool hdrActive, const float* primXY, bool sdrManaged);
     void MaybeRenderAnalyzer();
     void CreateAnalyzerResources();
+    void RecordSnapshot();   // ui3 B5: Frame()'s end, only while m_snapWanted
     void RenderGradient(float timeSec);
     void ReportStats();
     void WaitForGpuIdle();
@@ -3376,6 +3490,8 @@ private:
         float tauR;      // seconds for r to relax toward rt. 0 = the shared
                          // 0.34 s default; set per droplet by the birth and
                          // death sites when conserve_mass is on.
+        int   big;       // 1 = a MEDIUM solid droplet (droplet_big_frac), set at
+                         // birth only, so 0 everywhere while the key is off.
     };
     std::vector<AcidDrop> m_acidDrops;
     std::vector<int>   m_dropletCellStart;  // kDropGridW*kDropGridH + 1
@@ -3441,4 +3557,16 @@ private:
     UINT64 m_anaFence = 0;
     bool   m_anaPending = false;
     float  m_lastAnaTime = -10.0f;
+
+    // ui3 B5 snapshot (RequestSnapshot / TakeSnapshot): a full-frame readback buffer that
+    // exists only between a request and ReleaseSnapshot / Shutdown
+    Microsoft::WRL::ComPtr<ID3D12Resource> m_snapReadback;
+    UINT   m_snapPitch = 0;
+    int    m_snapW = 0, m_snapH = 0;       // the frame size the buffer was made for
+    UINT64 m_snapFence = 0;
+    bool   m_snapWanted = false;           // asked, not yet recorded
+    bool   m_snapInFlight = false;         // recorded, not yet taken
+    bool   m_snapFailLogged = false;
+    float  m_snapSdrScale = 1.0f;          // the recorded frame's SDR white scale
+    float  m_snapCpuMs = 0.0f;
 };

@@ -17,8 +17,8 @@ Frames of the default oil look as the installer ships it, a minute or so apart.
 
 ## Install
 
-**[Download FluidWallpaper-Setup-2026.11.21.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.21.exe)**
-(1.7 MB) and run it. No admin rights are needed. The same package as a zip and the SHA-256 sums are in
+**[Download FluidWallpaper-Setup-2026.11.23.exe](https://github.com/Nickoo321/fluid-wallpaper/raw/main/release/FluidWallpaper-Setup-2026.11.23.exe)**
+(2.1 MB) and run it. No admin rights are needed. The same package as a zip and the SHA-256 sums are in
 [`release/`](release).
 
 - Windows 10 or 11, 64-bit, and a graphics card with DirectX 12.
@@ -31,7 +31,8 @@ Frames of the default oil look as the installer ships it, a minute or so apart.
 **On / off:** the "Fluid Wallpaper on-off" shortcut on the desktop, or the tray icon -> Exit.
 **Next colours:** the "Fluid Wallpaper next" shortcut, or the tray menu. The slow shift to the next pair of colours
 starts right away (first new colour after about half a minute).
-**Settings:** the tray icon -> Settings.
+**Settings:** the tray icon -> Settings, or the Fluid Wallpaper entry in the Start menu while it runs (see
+[Settings](#settings)).
 **Uninstall:** Windows Settings -> Apps -> Fluid Wallpaper, or the Start menu entry. It asks whether to delete your
 settings too.
 **Updates:** from version 2026.11.21 on it updates itself. At most once a day (when you sign in to Windows, or turn
@@ -39,6 +40,22 @@ the wallpaper on with its shortcut) it looks at [`release/`](release) here; when
 it, checks its SHA-256 and installs it without asking. Your settings are kept. It waits while a game or film fills
 the screen. To switch that off, create an empty file named `no-auto-update.txt` in `%APPDATA%\FluidWallpaper`.
 A copy older than 2026.11.21 does not do this: run the newer Setup over it once.
+
+## Settings
+
+![The Settings window's Home screen: the colour pair playing now on the left, the colour pairs on the right](images/settings-home.png)
+
+The window opens on the Home screen, which has two sides:
+
+- **The colour side** (left, in the colours on screen) holds what ends by itself: **Next**, **Keep this** (holds the
+  colours for 30 minutes), **Pause** (until you resume), and a 30-minute visit to another look such as Ink or Fluid.
+  After each one the automatic mode carries on.
+- **The black side** (right) holds what is kept until you change it: the colour pairs and how often each one comes up,
+  **Never show this**, **Add a pair** (pick two hues), and a list of everything that is now different from automatic,
+  each line with an X that undoes it.
+- **All looks** rates every pair and look and can show any of them next. **Display and system** has the frame rate,
+  the pauses for fullscreen and maximized windows, the second monitor and starting with Windows.
+- **Advanced** is the earlier window, with every setting it had.
 
 ## Privacy
 
@@ -103,7 +120,7 @@ installed copy alone.
 
 - `src/` the wallpaper: `main.cpp` (app shell, tray, HDR detection, ini), `fluid.cpp` + `shaders.h` (simulation and
   rendering), `director.cpp` (the colour director), `cycle.cpp` (the look cycle), `ui/` (the Settings window).
-- `src/third_party/imgui/` Dear ImGui, unchanged.
+- `src/third_party/imgui/` Dear ImGui, unchanged. `src/ui/fonts/` the Schibsted Grotesk font files and their licence.
 - `src_oil/`, `src_acid/`, `src_ink3d/` the proofs of concept.
 - `tools/installer/` the installer scripts and `data/`, the default settings, look files and presets.
 - `release/` the built installer.
@@ -115,5 +132,7 @@ MIT, see [LICENSE](LICENSE).
 The fluid simulation started as a C++ / Direct3D 12 port of
 [WebGL Fluid Simulation](https://github.com/PavelDoGreat/WebGL-Fluid-Simulation) by Pavel Dobryakov (MIT).
 The Settings window uses [Dear ImGui](https://github.com/ocornut/imgui) by Omar Cornut (MIT).
+Its typeface is [Schibsted Grotesk](https://github.com/schibsted/schibsted-grotesk) by The Schibsted-Grotesk Project
+Authors (SIL Open Font License 1.1).
 Full notices: [THIRD-PARTY-NOTICES.md](THIRD-PARTY-NOTICES.md).
 

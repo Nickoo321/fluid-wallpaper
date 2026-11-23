@@ -8,3 +8,9 @@
 202 RCDATA "ui/thumbs/acid.png"
 203 RCDATA "ui/thumbs/ink.png"
 204 RCDATA "ui/thumbs/cycle.png"
+
+// ui3 Settings screens: Schibsted Grotesk (OFL, src/ui/fonts/OFL.txt) 400 / 600 / 700, embedded so the single exe
+// needs no font install (ui_home.cpp UiHomeLoadFonts)
+205 RCDATA "ui/fonts/SchibstedGrotesk-Regular.ttf"
+206 RCDATA "ui/fonts/SchibstedGrotesk-SemiBold.ttf"
+207 RCDATA "ui/fonts/SchibstedGrotesk-Bold.ttf"

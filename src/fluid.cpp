@@ -92,7 +92,7 @@ struct SimCB {
     float gravity;       // dye-weighted gravity (0 = off; the branch is skipped)
     float gravityPow;
     float gravityBlur;
-    float pad0_;
+    float dyeRise;       // uv/s upward, read by CSAdvectDye only ([drops] ink_rise; 0 = off)
 };
 static_assert(sizeof(SimCB) == 24 * 4, "SimCB must match the HLSL cbuffer layout (24 DWORDs)");
 
@@ -281,18 +281,29 @@ static const char* const kSpecTintVal[3] = { "0", "1", "2" };
 // T8b: film_hue2_seam_stretch rides the same way, in quarter steps (SEAM_STRETCH=<1..12>; 0 = no define = the
 // shader source of before, so the default is the same blob).
 static std::atomic<int> g_seamStretch{ 0 };
+// film_hue2_leak the same way: amount | reach << 8 | core << 16 (SEAM_LEAK / SEAM_LEAK_R in twentieths,
+// SEAM_LEAK_C in quarters, each 1..24); 0 = no define.
+static std::atomic<int> g_seamLeak{ 0 };
 static const char* const kSeamStretchVal[25] = { "0", "1", "2", "3", "4", "5", "6", "7", "8", "9", "10", "11", "12",
     "13", "14", "15", "16", "17", "18", "19", "20", "21", "22", "23", "24" };
 static std::vector<D3D_SHADER_MACRO> SpecTintDefs(const char* src, const D3D_SHADER_MACRO* defines) {
     std::vector<D3D_SHADER_MACRO> v;
     const int t = g_specTint.load(), q = g_seamStretch.load();
     const bool tOn = t >= 1 && t <= 2, qOn = q >= 1 && q <= 24;
-    if ((!tOn && !qOn) || src != kDisplaySrc || !defines) return v;
+    const int lk = g_seamLeak.load(), lA = lk & 255, lR = (lk >> 8) & 255, lC = (lk >> 16) & 255, lI = (lk >> 24) & 31;
+    const bool lOn = lA >= 1 && lA <= 24 && lR >= 1 && lR <= 24 && lC >= 1 && lC <= 24;
+    if ((!tOn && !qOn && !lOn) || src != kDisplaySrc || !defines) return v;
     bool acid = false;
     for (const D3D_SHADER_MACRO* d = defines; d->Name; d++) if (strcmp(d->Name, "LIQUID_ACID") == 0) acid = true;
     if (!acid) return v;
     if (tOn) v.push_back({ "SPEC_TINT", kSpecTintVal[t] });
     if (qOn) v.push_back({ "SEAM_STRETCH", kSeamStretchVal[q] });
+    if (lOn) {
+        v.push_back({ "SEAM_LEAK", kSeamStretchVal[lA] });
+        v.push_back({ "SEAM_LEAK_R", kSeamStretchVal[lR] });
+        v.push_back({ "SEAM_LEAK_C", kSeamStretchVal[lC] });
+        if (lI >= 1 && lI <= 24) v.push_back({ "SEAM_LEAK_I", kSeamStretchVal[lI] });
+    }
     for (const D3D_SHADER_MACRO* d = defines; d->Name; d++) v.push_back(*d);
     v.push_back({ nullptr, nullptr });
     return v;
@@ -1258,8 +1269,17 @@ void FluidRenderer::SyncDropLife() {
     const int  wantT = (m_cfg.acid.enabled && ot >= 1 && ot <= 2) ? ot : 0;
     // T8b: film_hue2_seam_stretch in quarter steps (0..6 -> 0..24), any look
     const int  wantQ = m_cfg.acid.enabled ? (int)fminf(fmaxf(m_cfg.acid.filmHue2SeamStretch * 4.0f + 0.5f, 0.0f), 24.0f) : 0;
+    // film_hue2_leak: amount and reach in twentieths, the core in quarters, packed; any look
+    int wantL = 0;
+    if (m_cfg.acid.enabled && m_cfg.acid.filmHue2Leak > 0.024f) {
+        const int la = (int)fminf(fmaxf(m_cfg.acid.filmHue2Leak * 20.0f + 0.5f, 1.0f), 24.0f);
+        const int lr = (int)fminf(fmaxf(m_cfg.acid.filmHue2LeakReach * 20.0f + 0.5f, 1.0f), 24.0f);
+        const int lc = (int)fminf(fmaxf(m_cfg.acid.filmHue2LeakCore * 4.0f + 0.5f, 1.0f), 24.0f);
+        const int li = (int)fminf(fmaxf(m_cfg.acid.filmHue2LeakIn * 20.0f + 0.5f, 0.0f), 24.0f);
+        wantL = la | (lr << 8) | (lc << 16) | (li << 24);
+    }
     if (want == g_dropLife.load() && wantX == g_dropLifeX.load() && wantT == g_specTint.load()
-        && wantQ == g_seamStretch.load()) return;
+        && wantQ == g_seamStretch.load() && wantL == g_seamLeak.load()) return;
     WaitForGpuIdle();
     if (m_deviceLost) return;
     g_dropLife.store(want);
@@ -1267,6 +1287,8 @@ void FluidRenderer::SyncDropLife() {
     g_specTint.store(wantT);
     if (wantQ != g_seamStretch.load()) printf("look: SEAM_STRETCH %d/4 (film_hue2_seam_stretch %.2f)\n", wantQ, m_cfg.acid.filmHue2SeamStretch);
     g_seamStretch.store(wantQ);
+    if (wantL != g_seamLeak.load()) printf("look: SEAM_LEAK %d/20 reach %d/20 core %d/4 in %d/20\n", wantL & 255, (wantL >> 8) & 255, (wantL >> 16) & 255, (wantL >> 24) & 31);
+    g_seamLeak.store(wantL);
     m_psoLiquidAcidH.Reset();
     m_psoSurface.Reset();
     m_psoLiquidAcidC.Reset();
@@ -1651,6 +1673,7 @@ void FluidRenderer::EnsureMurk() {
             | ((unsigned long long)(unsigned)g_dropLifeX.load() << 14)
             | ((unsigned long long)(unsigned)g_specTint.load() << 16)
             | ((unsigned long long)(unsigned)g_seamStretch.load() << 20)
+            | ((unsigned long long)(unsigned)g_seamLeak.load() << 32)
             | ((unsigned long long)(a.Lamp2Wanted() ? 1 : 0) << 12) | ((unsigned long long)(a.DarkDyeWanted() ? 1 : 0) << 13);
         if (sig != m_waterPrewarmSig) {
             m_waterPrewarmSig = sig;
@@ -2541,7 +2564,21 @@ void FluidRenderer::SimStep(float dt) {
     cb.dissipationFast = powf(m_cfg.decayFast, stepsRef);
     cb.decayThreshold = m_cfg.decayThreshold;
     cb.satRestore = 1.0f - powf(1.0f - fminf(m_cfg.satRestore, 0.9999f), dt);
+    // [drops] ink_rise: the dye drifts up with the oil picture (x rise_speed,
+    // liquid_acid only). 0 = the field stays 0 and the shader's branch is skipped.
+    if (m_cfg.drops.inkRise > 0.0f && m_cfg.acid.enabled)
+        cb.dyeRise = m_cfg.drops.inkRise * m_cfg.acid.riseSpeed;
+    // [drops] ink_swirl (round 3): the dye's own slow noise current. SimCB is full (24 DWORDs), so for THIS
+    // pass only two fields CSAdvectDye never reads carry it: gravityPow = -amplitude (negative = the flag,
+    // its real value is always > 0) and value = the clock. Both are put back right after. Off = untouched.
+    const float gpKeep = cb.gravityPow, valKeep = cb.value;
+    if (m_cfg.drops.inkSwirl > 0.0f && m_cfg.acid.enabled) {
+        cb.gravityPow = -m_cfg.drops.inkSwirl;
+        cb.value = m_time;
+    }
     bind(m_psoAdvectDye.Get(), m_velocity.read, m_dye.read, m_dye.write, 4);
+    cb.gravityPow = gpKeep; cb.value = valKeep;
+    cb.dyeRise = 0.0f;
     m_dye.Swap();
     // 9. dye diffusion (optional): the Dâˆ‡Â²c smoke-spread term
     if (m_cfg.dyeDiffusion > 0.0001f) {
@@ -3355,15 +3392,22 @@ void FluidRenderer::BuildMirrorConstants(float out[20], int w, int h) const {
     const float vw = fminf(fmaxf(po.vignetteWander, 0.0f), 1.0f);
     const float vignCx = fminf(fmaxf(0.5f + (m_rig.axisX - 0.5f) * 4.0f * vw, 0.18f), 0.82f);
     const float vignCy = fminf(fmaxf(0.5f + (m_rig.axisY - 0.5f) * 4.0f * vw, 0.18f), 0.82f);
+    // mode 5 (the fish-eye camera, fluid.h) has no fold: it reads its own four
+    // numbers out of the slots the folds use (segments -> fov, rotate_period
+    // -> pitch, drift -> height, soft -> horizon fade), so the root constants
+    // keep their 20 floats. Every other mode: the values these always were.
+    const bool cam = (mr.mode == 5);
     const float c[20] = {
-        (float)mr.mode, (float)mr.segments, aspect, m_time,
-        mr.centerX, mr.centerY, fmaxf(mr.rotatePeriod, 0.0f),
-        fminf(fmaxf(mr.drift, 0.0f), 1.0f),
+        (float)mr.mode, cam ? mr.camFov : (float)mr.segments, aspect, m_time,
+        mr.centerX, mr.centerY, cam ? mr.camPitch : fmaxf(mr.rotatePeriod, 0.0f),
+        cam ? fmaxf(mr.camHeight, 0.01f) : fminf(fmaxf(mr.drift, 0.0f), 1.0f),
         // 10, 11: brief BD's two grain knobs for the DISPLAY pass's own copy
         // of the film grain -- the one that runs when no image-space pass is
         // on. 1 / 0 is the behaviour this had when these two slots were the
         // literal zeros they replace.
-        fmaxf(mr.soft, 0.0f), (float)(mr.source & 3),
+        // (mode 5: the `source` slot carries cam_relief, the dome height the camera's relief walk uses)
+        cam ? fmaxf(mr.camFade, 0.0f) : fmaxf(mr.soft, 0.0f),
+        cam ? fminf(fmaxf(mr.camRelief, 0.0f), 1.5f) : (float)(mr.source & 3),
         fminf(fmaxf(po.filmGrainChroma, 0.0f), 1.0f),
         fminf(fmaxf(po.filmGrainDensity, 0.0f), 1.0f),
         // grain moves to the post pass on the draws it follows (see kPostSrc)
@@ -3401,6 +3445,7 @@ void FluidRenderer::MirrorMapPointer(float& px, float& py,
     flipX = flipY = 1.0f;
     const MirrorConfig& mr = m_cfg.mirror;
     if (mr.mode <= 0 || m_width <= 0 || m_height <= 0) return;
+    if (mr.mode >= 5) return;      // the fish-eye camera: the pointer is not carried through the lens (test)
 
     float u = px / (float)m_width, v = py / (float)m_height;
     float cx = mr.centerX, cy = mr.centerY;
@@ -3562,6 +3607,192 @@ bool FluidRenderer::ReadAnalyzerFrame(std::vector<float>& out) {
     m_anaReadback->Unmap(0, &none);
     m_anaPending = false;
     return true;
+}
+
+// ---------------------------------------------------------------------------
+// ui3 B5: the Settings window's picture of "now" (fluid.h RequestSnapshot)
+// ---------------------------------------------------------------------------
+
+// Frame()'s end, only while a request is pending: ONE copy of the finished frame (the back
+// buffer after the display and post passes, i.e. exactly what Present shows; headless: the
+// offscreen target the --shot PNG reads) into a readback buffer, recorded in the frame's own
+// command list. The copy only READS the frame; every state it changes is put back, so the
+// presented image is the same with and without it. Read on the frame's fence by TakeSnapshot,
+// as ReadAnalyzerFrame does: never a stall.
+void FluidRenderer::RecordSnapshot() {
+    if (m_snapInFlight) return;   // the last copy is not taken yet: this request waits for a later frame
+    ID3D12Resource* src = m_headless ? m_shotTex.Get() : m_backBuffers[m_frameIndex].Get();
+    if (!src) return;
+    const D3D12_RESOURCE_DESC sd = src->GetDesc();
+    if (sd.Format != DXGI_FORMAT_R16G16B16A16_FLOAT || sd.Width != (UINT64)m_width || sd.Height != (UINT)m_height) {
+        if (!m_snapFailLogged) WpLog("snapshot: the frame is not the expected FP16 %dx%d target, no picture", m_width, m_height);
+        m_snapFailLogged = true;
+        m_snapWanted = false;
+        return;
+    }
+    // a resized frame (re-init at another size): the old buffer has no copy in flight, so it can go
+    if (m_snapReadback && (m_snapW != m_width || m_snapH != m_height)) m_snapReadback.Reset();
+    if (!m_snapReadback) {
+        const UINT pitch = ((UINT)m_width * 8 + 255) & ~255u;   // as CreateOffscreenTarget's m_shotPitch
+        D3D12_RESOURCE_DESC bd = {};
+        bd.Dimension = D3D12_RESOURCE_DIMENSION_BUFFER;
+        bd.Width = (UINT64)pitch * m_height;
+        bd.Height = 1;
+        bd.DepthOrArraySize = 1;
+        bd.MipLevels = 1;
+        bd.SampleDesc.Count = 1;
+        bd.Layout = D3D12_TEXTURE_LAYOUT_ROW_MAJOR;
+        D3D12_HEAP_PROPERTIES rb = {};
+        rb.Type = D3D12_HEAP_TYPE_READBACK;
+        // not HR(): a picture for the Settings window is never worth a fatal box; a lost device
+        // is found by the frame path's own calls, which go through HR as always
+        const HRESULT hr = m_device->CreateCommittedResource(&rb, D3D12_HEAP_FLAG_NONE, &bd,
+                                                             D3D12_RESOURCE_STATE_COPY_DEST, nullptr,
+                                                             IID_PPV_ARGS(&m_snapReadback));
+        if (FAILED(hr) || !m_snapReadback) {
+            if (!m_snapFailLogged) WpLog("snapshot: readback buffer refused hr=0x%08lX, no picture", (unsigned long)hr);
+            m_snapFailLogged = true;
+            m_snapReadback.Reset();
+            m_snapWanted = false;   // the window asks again in 10 s
+            return;
+        }
+        m_snapPitch = pitch;
+        m_snapW = m_width;
+        m_snapH = m_height;
+    }
+
+    // The state the frame left the target in: the swap chain's back buffer is PRESENT after
+    // RenderDisplay's last barrier; the headless target stays in m_shotState (RENDER_TARGET).
+    const D3D12_RESOURCE_STATES was = m_headless ? m_shotState : D3D12_RESOURCE_STATE_PRESENT;
+    D3D12_RESOURCE_BARRIER b = {};
+    b.Type = D3D12_RESOURCE_BARRIER_TYPE_TRANSITION;
+    b.Transition.pResource = src;
+    b.Transition.StateBefore = was;
+    b.Transition.StateAfter = D3D12_RESOURCE_STATE_COPY_SOURCE;
+    b.Transition.Subresource = D3D12_RESOURCE_BARRIER_ALL_SUBRESOURCES;
+    if (was != D3D12_RESOURCE_STATE_COPY_SOURCE) m_cmd->ResourceBarrier(1, &b);
+
+    D3D12_TEXTURE_COPY_LOCATION s = {}, dst = {};
+    s.pResource = src;
+    s.Type = D3D12_TEXTURE_COPY_TYPE_SUBRESOURCE_INDEX;
+    dst.pResource = m_snapReadback.Get();
+    dst.Type = D3D12_TEXTURE_COPY_TYPE_PLACED_FOOTPRINT;
+    dst.PlacedFootprint.Footprint.Format = DXGI_FORMAT_R16G16B16A16_FLOAT;
+    dst.PlacedFootprint.Footprint.Width = (UINT)m_width;
+    dst.PlacedFootprint.Footprint.Height = (UINT)m_height;
+    dst.PlacedFootprint.Footprint.Depth = 1;
+    dst.PlacedFootprint.Footprint.RowPitch = m_snapPitch;
+    m_cmd->CopyTextureRegion(&dst, 0, 0, 0, &s, nullptr);
+
+    if (was != D3D12_RESOURCE_STATE_COPY_SOURCE) {   // back to exactly the state it was found in
+        b.Transition.StateBefore = D3D12_RESOURCE_STATE_COPY_SOURCE;
+        b.Transition.StateAfter = was;
+        m_cmd->ResourceBarrier(1, &b);
+    }
+
+    m_snapFence = m_nextFence;   // signaled by EndFrameAndPresent, right after this
+    m_snapSdrScale = m_sdrScale;
+    m_snapInFlight = true;
+    m_snapWanted = false;
+}
+
+static inline float SnapClamp01(float v) { return v > 0.0f ? (v < 1.0f ? v : 1.0f) : 0.0f; }   // NaN -> 0
+static inline uint8_t SnapSrgb8(float c) {   // main.cpp LinearToSrgb + ToByte, the --shot PNG's encode
+    c = SnapClamp01(c);
+    const float s = c <= 0.0031308f ? c * 12.92f : 1.055f * powf(c, 1.0f / 2.4f) - 0.055f;
+    const int v = (int)(s * 255.0f + 0.5f);
+    return (uint8_t)(v < 0 ? 0 : (v > 255 ? 255 : v));
+}
+
+bool FluidRenderer::TakeSnapshot(std::vector<uint8_t>& rgba, int& w, int& h) {
+    if (!m_snapInFlight || !m_snapReadback || !m_fence || m_deviceLost) return false;
+    if (m_fence->GetCompletedValue() < m_snapFence) return false;
+    LARGE_INTEGER q0, q1, qf;
+    QueryPerformanceCounter(&q0);
+
+    const int sw = m_snapW, sh = m_snapH;
+    const int mw = kSnapMaxW, mh = kSnapMaxH;   // locals: std::min takes references
+    const float k = fminf(1.0f, fminf((float)mw / (float)sw, (float)mh / (float)sh));
+    const int dw = std::max(1, std::min(std::min(mw, sw), (int)lroundf((float)sw * k)));
+    const int dh = std::max(1, std::min(std::min(mh, sh), (int)lroundf((float)sh * k)));
+
+    uint8_t* data = nullptr;
+    D3D12_RANGE range = { 0, (SIZE_T)m_snapPitch * sh };
+    if (FAILED(m_snapReadback->Map(0, &range, (void**)&data))) {
+        m_snapInFlight = false;   // a lost device: the rebuild starts clean; else the next request
+        return false;
+    }
+    // every half value -> float once (64 K entries), so the 3.7 M px of a 1440p frame cost
+    // a table read per channel instead of HalfToFloat's bit work
+    static const std::vector<float> lut = [] {
+        std::vector<float> t(65536);
+        for (uint32_t i = 0; i < 65536; i++) t[i] = HalfToFloat((uint16_t)i);
+        return t;
+    }();
+    // display-referred as the --shot SDR PNG: SDR white -> 1.0 (HDR on: / the SDR white scale;
+    // HDR off: the scale is 1), negatives and NaN -> 0, clip at 1; then a box average in linear
+    // light over each output pixel's footprint, then the sRGB encode
+    const float inv = 1.0f / fmaxf(m_snapSdrScale, 1e-4f);
+    std::vector<int> xs((size_t)dw + 1);
+    for (int i = 0; i <= dw; i++) xs[i] = (int)((long long)i * sw / dw);
+    std::vector<float> acc((size_t)dw * 3);
+    rgba.resize((size_t)dw * dh * 4);
+    for (int oy = 0; oy < dh; oy++) {
+        const int y0 = (int)((long long)oy * sh / dh), y1 = (int)((long long)(oy + 1) * sh / dh);
+        std::fill(acc.begin(), acc.end(), 0.0f);
+        for (int y = y0; y < y1; y++) {
+            const uint16_t* row = (const uint16_t*)(data + (SIZE_T)y * m_snapPitch);
+            for (int ox = 0; ox < dw; ox++) {
+                float r = 0, g = 0, bl = 0;
+                for (int x = xs[ox]; x < xs[ox + 1]; x++) {
+                    const uint16_t* p = row + (size_t)x * 4;
+                    r  += SnapClamp01(lut[p[0]] * inv);
+                    g  += SnapClamp01(lut[p[1]] * inv);
+                    bl += SnapClamp01(lut[p[2]] * inv);
+                }
+                float* a = acc.data() + (size_t)ox * 3;
+                a[0] += r; a[1] += g; a[2] += bl;
+            }
+        }
+        uint8_t* o = rgba.data() + (size_t)oy * dw * 4;
+        for (int ox = 0; ox < dw; ox++) {
+            const float n = (float)((y1 - y0) * (xs[ox + 1] - xs[ox]));
+            const float in = n > 0.0f ? 1.0f / n : 0.0f;
+            const float* a = acc.data() + (size_t)ox * 3;
+            o[ox * 4 + 0] = SnapSrgb8(a[0] * in);
+            o[ox * 4 + 1] = SnapSrgb8(a[1] * in);
+            o[ox * 4 + 2] = SnapSrgb8(a[2] * in);
+            o[ox * 4 + 3] = 255;
+        }
+    }
+    D3D12_RANGE none = { 0, 0 };
+    m_snapReadback->Unmap(0, &none);
+    m_snapInFlight = false;
+    w = dw;
+    h = dh;
+    QueryPerformanceCounter(&q1);
+    QueryPerformanceFrequency(&qf);
+    m_snapCpuMs = (float)(1000.0 * (double)(q1.QuadPart - q0.QuadPart) / (double)qf.QuadPart);
+    // ui3: the conversion's CPU cost in the app log, the first time and whenever it is over 8 ms (a hitch to find later)
+    static bool s_snapCpuLogged = false;
+    if (!s_snapCpuLogged || m_snapCpuMs > 8.0f) {
+        s_snapCpuLogged = true;
+        WpLog("[snapshot] cpu %.1f ms (%dx%d -> %dx%d)", m_snapCpuMs, sw, sh, dw, dh);
+    }
+    return true;
+}
+
+// The Settings window closed: the readback buffer goes (a copy still on the GPU is waited
+// for first, at most the frame in flight). The next request makes a new one.
+void FluidRenderer::ReleaseSnapshot() {
+    m_snapWanted = false;
+    if (m_snapInFlight && m_snapReadback && m_fence && !m_deviceLost &&
+        m_fence->GetCompletedValue() < m_snapFence)
+        WaitForGpuIdle();
+    m_snapInFlight = false;
+    m_snapReadback.Reset();
+    m_snapPitch = 0;
+    m_snapW = m_snapH = 0;
 }
 
 // ---------------------------------------------------------------------------
@@ -3789,6 +4020,7 @@ void FluidRenderer::Frame(float dt, float sdrScale, bool hdrActive, const FrameI
         else            RenderDisplay();
         if (m_mirrorChain && !m_mirrorBroken) RenderMirror();
         if (m_anaEnabled && !m_photoMode) MaybeRenderAnalyzer();
+        if (m_snapWanted) RecordSnapshot();   // ui3 B5: records nothing unless the Settings window asked
     }
     EndFrameAndPresent();
 
@@ -4653,6 +4885,15 @@ void FluidRenderer::Shutdown() {
     m_anaReadback.Reset();
     m_anaPending = false;
     m_anaState = D3D12_RESOURCE_STATE_RENDER_TARGET;
+
+    // ui3 B5 snapshot: the readback goes with the device (lost / suspended / re-init at another
+    // size). A copy that was in flight is asked for again, so the open Settings window gets its
+    // picture from the rebuilt renderer's first drawn frame.
+    if (m_snapInFlight) m_snapWanted = true;
+    m_snapInFlight = false;
+    m_snapReadback.Reset();
+    m_snapPitch = 0;
+    m_snapW = m_snapH = 0;
 
     // headless capture target
     m_shotTex.Reset();
@@ -5765,7 +6006,14 @@ void FluidRenderer::UpdateVelocityReadback() {
         (!m_headless || m_time - m_lastVelTime >= kVelPeriod)) {
         uint8_t* data = nullptr;
         D3D12_RANGE range = { 0, (SIZE_T)m_velPitch * kVelH };
-        if (SUCCEEDED(m_velReadback->Map(0, &range, (void**)&data))) {
+        if (!m_cfg.drops.pushFilm) {
+            // [drops] push_film = 0 (ag-ink): the CPU copy stays at rest, so the
+            // blobs, the droplets and the hue field ride still water whatever
+            // the ink drops stir up (the GPU copy, VelLow, still drives the
+            // ink's own motion gate). NOTE: this freezes the look's own
+            // currents too (oil drag edge push), so the film is not today's.
+            for (float& v : m_velCpu) v = 0.0f;
+        } else if (SUCCEEDED(m_velReadback->Map(0, &range, (void**)&data))) {
             for (int y = 0; y < kVelH; y++) {
                 const uint16_t* row = (const uint16_t*)(data + (SIZE_T)y * m_velPitch);
                 for (int x = 0; x < kVelW; x++) {
@@ -6717,6 +6965,22 @@ void FluidRenderer::StepAcidDroplets(float dt) {
     // ring breaks that on purpose and buys the invariant back by being
     // registered in every cell its support covers (see buildGrid's `spread`).
     const float ringMul  = fminf(fmaxf(a.dropletRingRMul, 1.0f), 6.0f);
+    // MEDIUM BLACK DROPLETS (droplet_big_frac / droplet_big_r_mul, fluid.h):
+    // with the key at 0 bigOn is false, no droplet carries the flag and every
+    // line below that names it takes the path it took before.
+    const float bigMul  = fminf(fmaxf(a.dropletBigRMul, 1.0f), 6.0f);
+    const float bigFrac = (bigMul > 1.251f) ? fminf(fmaxf(a.dropletBigFrac, 0.0f), 1.0f) : 0.0f;
+    const bool  bigOn   = (bigFrac > 1e-6f);
+    // a medium droplet holds its neighbours off at kBigSep x the radius sum:
+    // the droplet kernel reaches 2.2x the drawn radius, and at 1.4x (the first
+    // try) two fields still summed over the isoline between them, so a pair
+    // drew one lump and a small neighbour a knob on the rim. At 1.75x each
+    // kernel is under ~0.08 at the midpoint, below the isoline's level even
+    // in thin film. That is further than the 3x3 cell walk sees: it walks
+    // this many cells instead.
+    const float kBigSep = 1.75f;
+    const int   bigWalk = bigOn ? (int)fminf(ceilf(kBigSep * rMax * (2.0f * bigMul)
+                                                   * (float)kDropGridH) + 1.0f, 8.0f) : 1;
     // ---- RACING MICRO-BUBBLES (brief Y) ----------------------------------
     // An ordinary trapped droplet rides the oil and lags it by droplet_rise,
     // so its NET climb is riseSpeed * (1 - droplet_rise). A racer's bonus is
@@ -6875,6 +7139,35 @@ void FluidRenderer::StepAcidDroplets(float dt) {
                     // further inside as its radius grows, so demanding the
                     // full final margin up front rejected every candidate.
                     if (sdf < out.rt * 0.30f) continue;
+                }
+            }
+            // ---- MEDIUM SOLID DROPLET (droplet_big_frac) ------------------
+            // From the position hash, like the big ring above. It is born
+            // only where its whole disc fits inside the film with room to
+            // spare: a medium black disc that overlaps the film's edge reads
+            // as a bite out of the outline, not as a droplet.
+            if (bigOn && kind == 0 && !out.ring) {
+                if (hash01(x, y, 0x1B873593u) < bigFrac) {
+                    const float hs = hash01(x, y, 0xCC9E2D51u);
+                    out.rt = rMax * (1.25f + (bigMul - 1.25f) * hs * sqrtf(hs));
+                    out.big = 1;
+                    if (sdf < out.rt * 1.30f) continue;
+                    // ...and never within reach of another medium one: two
+                    // born overlapping stayed one fused lump (their kernels
+                    // reach 2.2x the radius). Same spacing as the pair rule.
+                    bool crowded = false;
+                    for (size_t q = 0; q < m_acidDrops.size() && !crowded; q++) {
+                        const AcidDrop& o = m_acidDrops[q];
+                        if (!o.big || o.rt <= 0.0f) continue;
+                        const float ox = (o.x - x) * aspect, oy = o.y - y;
+                        const float rs = kBigSep * (out.rt + fmaxf(o.r, o.rt)) + 0.5f * rMax;
+                        crowded = (ox * ox + oy * oy < rs * rs);
+                    }
+                    if (crowded) continue;
+                    // On the masses' plane (0.42..0.5 of the hash's spread): a
+                    // medium droplet is BLACK OIL, so the depth haze (which
+                    // fades a deep droplet toward the film) must not reach it.
+                    out.depth = 0.42f + 0.08f * out.depth;
                 }
             }
             // ---- RACING MICRO-BUBBLE ------------------------------------
@@ -7036,7 +7329,8 @@ void FluidRenderer::StepAcidDroplets(float dt) {
         // ---- confinement: kind 0 stays inside the oil, kind 1 outside it --
         // Push back along the field gradient (which points INTO the oil).
         const float want = (d.kind == 0) ? 1.0f : -1.0f;
-        const float margin = fmaxf(d.r * 0.6f, 1e-4f);
+        // (a medium droplet keeps its whole disc inside, droplet_big_frac)
+        const float margin = fmaxf(d.r * ((bigOn && d.big) ? 1.15f : 0.6f), 1e-4f);
         if (sdf * want < margin) {
             const float over = (margin - sdf * want) / margin;
             const float push = 0.05f * fminf(over, 3.0f);
@@ -7215,8 +7509,16 @@ void FluidRenderer::StepAcidDroplets(float dt) {
         if (!spread) cellOf.assign((size_t)m, 0);
         else         ins.reserve((size_t)m + 256);
         int placed = 0;
+        // droplet_big_frac: the medium droplets go into the shader's table
+        // FIRST, so the per-cell cap can never cut one cell out of a big disc.
+        // Key off = one pass in the order it always had.
+        // (the neighbour table too: a medium droplet cut by the cap would
+        // stop holding anybody off)
+        const int passes = bigOn ? 2 : 1;
+        for (int pass = 0; pass < passes; pass++)
         for (int i = 0; i < m; i++) {
             const AcidDrop& d = m_acidDrops[i];
+            if (passes == 2 && ((d.big != 0) != (pass == 0))) continue;
             int cx = (int)floorf(d.x * kDropGridW);
             int cy = (int)floorf(d.y * kDropGridH);
             cx = cx < 0 ? 0 : (cx >= kDropGridW ? kDropGridW - 1 : cx);
@@ -7310,17 +7612,23 @@ void FluidRenderer::StepAcidDroplets(float dt) {
         for (int si = m_dropletCellStart[ci]; si < e0; si++) {
             const int i = m_dropletOrder[si];
             if (m_acidDrops[i].r <= 0.0f) continue;
-            for (int oy = -1; oy <= 1; oy++) {
+            // wr = 1 for everybody but a medium droplet (droplet_big_frac)
+            const int wr = (bigOn && m_acidDrops[i].big) ? bigWalk : 1;
+            for (int oy = -wr; oy <= wr; oy++) {
                 const int yy = cy0 + oy;
                 if (yy < 0 || yy >= kDropGridH) continue;
-                for (int ox = -1; ox <= 1; ox++) {
+                for (int ox = -wr; ox <= wr; ox++) {
                     const int xx = cx0 + ox;
                     if (xx < 0 || xx >= kDropGridW) continue;
                     const int cj = yy * kDropGridW + xx;
                     const int e1 = m_dropletCellStart[cj] + m_dropletCellCount[cj];
+                    // beyond the 3x3 only a medium droplet looks: it takes
+                    // every partner there, and of two medium ones the lower index
+                    const bool farCell = (ox < -1 || ox > 1 || oy < -1 || oy > 1);
                     for (int sj = m_dropletCellStart[cj]; sj < e1; sj++) {
                         const int j = m_dropletOrder[sj];
-                        if (j <= i) continue;               // each pair once
+                        if (farCell ? (j == i || (m_acidDrops[j].big && j < i))
+                                    : (j <= i)) continue;   // each pair once
                         AcidDrop& di = m_acidDrops[i];
                         AcidDrop& dj = m_acidDrops[j];
                         if (dj.kind != di.kind || dj.r <= 0.0f) continue;
@@ -7341,6 +7649,39 @@ void FluidRenderer::StepAcidDroplets(float dt) {
                         if (bothRing && dd < sum * 1.06f) {
                             if (i < n) touchNew[i]++;
                             if (j < n) touchNew[j]++;
+                        }
+                        // ---- MEDIUM DROPLETS STAY ROUND (droplet_big_frac) --
+                        // A droplet parked in contact fuses its field with its
+                        // neighbour's: on a small pair that is a moment before
+                        // they pour together, on a medium disc it is a knob on
+                        // the circle (the user on the hole blobs: "mad werid
+                        // and not circular"). So: a droplet whose centre is
+                        // under the disc pours into it (it is hidden there),
+                        // every other one is held off the rim, and nothing is
+                        // pulled toward a medium droplet. The disc keeps its
+                        // radius; it moves a quarter as much as what it pushes.
+                        if (bigOn && (di.big || dj.big)) {
+                            const bool both = (di.big && dj.big);
+                            if (!both) {
+                                AcidDrop& bg = di.big ? di : dj;
+                                AcidDrop& sm = di.big ? dj : di;
+                                if (dd < bg.r && sm.mergeTo < 0 && sm.rt > 0.0f && bg.rt > 0.0f) {
+                                    sm.rt = 0.0f; sm.tauR = mergeTau;
+                                    sm.mergeTo = di.big ? i : j;
+                                    continue;
+                                }
+                            }
+                            const float rest = sum * kBigSep;
+                            if (dd >= rest) continue;
+                            // strong enough that a pair pressed together at a
+                            // birth or by the flow is apart within seconds
+                            const float accB = (1.0f - dd / rest) * 1.2f;
+                            const float ki = (di.big && !both) ? 0.25f : 1.0f;
+                            const float kj = (dj.big && !both) ? 0.25f : 1.0f;
+                            const float uxB = dx * inv, uyB = dy * inv;
+                            ax[i] += uxB * accB * ki; ay[i] += uyB * accB * ki;
+                            ax[j] -= uxB * accB * kj; ay[j] -= uyB * accB * kj;
+                            continue;
                         }
                         // Two rings never merge (see kRingWall above); a ring
                         // meeting a SOLID droplet is absorbed by it instead,
@@ -9463,6 +9804,12 @@ void FluidRenderer::UploadAcidConstants() {
                     const float dep = fminf(fmaxf(0.5f + (d.depth - 0.5f) * dsp, 0.0f), 1.0f);
                     dq = 1.0f + floorf(dep * 254.0f + 0.5f);
                 }
+                // droplet_big_frac: a MEDIUM droplet adds 256 to dq (the shader
+                // reads dq > 255 as the flag and takes it off again). 4 x 511
+                // + 3 < 2048 keeps the gate to ~1e-4. Key off: never written.
+                const bool bigD = (d.big != 0 && !d.ring && a.dropletBigFrac > 1e-6f
+                                   && a.dropletBigRMul > 1.251f);
+                if (bigD) dq += 256.0f;
                 dd[k].a[3] = 4.0f * dq + d.gate + (d.ring ? 2.0f : 0.0f);
                 // ---- droplet_wobble: a SOLID droplet's life (DROP_LIFE only) --
                 // The ring's Fourier record below, reused for the solids while
@@ -9483,8 +9830,10 @@ void FluidRenderer::UploadAcidConstants() {
                     const float g5 = DropHash(d.seed, 15.0f, 0x6B43A9B5u);
                     const float g6 = DropHash(d.seed, 16.0f, 0x165667B1u);
                     const float rmx = fmaxf(a.dropletRMax, 1e-4f);
-                    const float kw  = fminf(a.dropletWobble, 1.0f)
-                                    * (0.35f + 0.65f * fminf(d.r / (0.5f * rmx), 1.0f));
+                    float kw  = fminf(a.dropletWobble, 1.0f)
+                              * (0.35f + 0.65f * fminf(d.r / (0.5f * rmx), 1.0f));
+                    // a medium droplet stays a clean circle (+-1 % at most)
+                    if (bigD) kw *= 0.2f;
                     const float bP  = 2.0f + 4.0f * g2;                       // breath period, s
                     dd[k].a[2] *= 1.0f + kw * (0.03f + 0.02f * g1) * sinf(TAU * (m_time / bP + g3));
                     const float sw  = sinf(TAU * (m_time / (bP * (1.3f + 0.9f * g6)) + g1));
@@ -9646,7 +9995,9 @@ void FluidRenderer::UploadInkConstants() {
                           fminf(fmaxf(k.toneKnee, 0.0f), 1.0f),
                           fmaxf(k.toneChroma, 0.0f) };
     const float p6[4] = { fminf(fmaxf(k.tintHueBlend, 0.0f), 1.0f),
-                          peakSc * m_fade, 0.0f, 0.0f };
+                          peakSc * m_fade,
+                          k.blackOnly ? 1.0f : 0.0f,                       // black_only
+                          k.blackOnly ? fminf(fmaxf(k.filmColour, 0.0f), 1.0f) : 0.0f };
     memcpy(p.p5, p5, 16); memcpy(p.p6, p6, 16);
 
     // ---- duotone PAIR ROTATION ([ink] pair_sweep_period) -----------------
@@ -9723,15 +10074,25 @@ void FluidRenderer::InjectDrop(float x, float y, float vx, float vy,
         const float lead = 1.0f + 0.5f * asym * side;
         const float sp   = fmaxf(d.impulseSpread, 0.25f);
         const float vr   = radiusPct * sp * sp;   // radius is a squared scale
-        SplatVelocity(x - off, y, vx - 0.25f * asym * vy * side, vy * lead,
-                      vr * (1.0f - 0.25f * asym));
-        SplatVelocity(x + off, y, vx + 0.25f * asym * vy * side, vy * (2.0f - lead),
-                      vr * (1.0f + 0.25f * asym));
+        // [drops] impulse (round 3): 1 = these two calls as they always were; 0 = no velocity at all
+        if (d.impulse >= 0.9999f) {
+            SplatVelocity(x - off, y, vx - 0.25f * asym * vy * side, vy * lead,
+                          vr * (1.0f - 0.25f * asym));
+            SplatVelocity(x + off, y, vx + 0.25f * asym * vy * side, vy * (2.0f - lead),
+                          vr * (1.0f + 0.25f * asym));
+        } else if (d.impulse > 0.0001f) {
+            const float ik = d.impulse;
+            SplatVelocity(x - off, y, (vx - 0.25f * asym * vy * side) * ik, vy * lead * ik,
+                          vr * (1.0f - 0.25f * asym));
+            SplatVelocity(x + off, y, (vx + 0.25f * asym * vy * side) * ik, vy * (2.0f - lead) * ik,
+                          vr * (1.0f + 0.25f * asym));
+        }
         SplatDye(x, y, col[0] * density, col[1] * density, col[2] * density,
                  radiusPct, cap, true);
     } else {
         const float sp = fmaxf(d.impulseSpread, 0.25f);
-        SplatVelocity(x, y, vx, vy, radiusPct * sp * sp);
+        if (d.impulse >= 0.9999f) SplatVelocity(x, y, vx, vy, radiusPct * sp * sp);
+        else if (d.impulse > 0.0001f) SplatVelocity(x, y, vx * d.impulse, vy * d.impulse, radiusPct * sp * sp);
         SplatDye(x, y, col[0] * density, col[1] * density, col[2] * density,
                  radiusPct, cap, true);
     }
@@ -9768,8 +10129,8 @@ void FluidRenderer::UpdateDrops(float dt) {
         const float tr = fmaxf(d.radius * d.tailRadiusFrac, 0.01f);
         // fps-normalised: this runs every frame for tail_sec, so an un-scaled
         // impulse would add ~86 kicks at 144 fps and fire the plume into the floor
-        if (d.tailSpeed > 0.001f)
-            SplatVelocity(m_dropTailX, m_dropTailY, 0.0f,
+        if (d.tailSpeed > 0.001f && d.impulse > 0.0001f)
+            SplatVelocity(m_dropTailX, m_dropTailY, 0.0f, (d.impulse >= 0.9999f ? 1.0f : d.impulse) *
                           d.speed * d.tailSpeed * m_emitScale * 0.1f, tr * 4.0f);
         SplatDye(m_dropTailX, m_dropTailY,
                  m_dropTailCol[0] * amt, m_dropTailCol[1] * amt, m_dropTailCol[2] * amt,
@@ -9787,8 +10148,27 @@ void FluidRenderer::UpdateDrops(float dt) {
     if (m_dropTimer > 0.0f) return;
     m_dropTimer = fmaxf(d.interval * (1.0f + (RandF() - 0.5f) * 0.7f), 0.5f);
     if (d.obeyGovernor && m_screenTooFull) return;   // water already full of ink
-    const float x = (d.xMin + (d.xMax - d.xMin) * RandF()) * (float)m_width;
-    const float y = (d.yMin + (d.yMax - d.yMin) * RandF()) * (float)m_height;
+    float x = (d.xMin + (d.xMax - d.xMin) * RandF()) * (float)m_width;
+    float y = (d.yMin + (d.yMax - d.yMin) * RandF()) * (float)m_height;
+    // in_black (fluid.h): the entry point goes where the oil field is below
+    // its threshold with room to spare, i.e. inside the black. Key at 0: not
+    // one extra random draw, the drop lands where it always did.
+    if (d.inBlack > 0.0f && m_cfg.acid.enabled) {
+        const float aspect = (float)m_width / fmaxf((float)m_height, 1.0f);
+        bool found = false;
+        for (int tr = 0; tr < 40 && !found; tr++) {
+            const float ux = 0.04f + 0.92f * RandF(), uy = 0.04f + 0.92f * RandF();
+            float f, gx, gy, ovx, ovy;
+            AcidFieldAt(ux, uy, aspect, f, gx, gy, ovx, ovy);
+            const float gl = sqrtf(gx * gx + gy * gy) + 1e-6f;
+            if ((f - m_cfg.acid.threshold) / gl < -d.inBlack) {
+                x = ux * (float)m_width;
+                y = uy * (float)m_height;
+                found = true;
+            }
+        }
+        if (!found) return;          // no black with room right now: skip this drop
+    }
     InjectDrop(x, y, (RandF() - 0.5f) * 120.0f, d.speed);
 }
 

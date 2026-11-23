@@ -369,6 +369,16 @@ KEY_SLIDER("  second hue coverage", 0, 0.25f, 0.01f, 2, &c.acid.filmHue2Cover, n
            G_COLOUR, "A", "liquid_acid.film_hue2_amt>0", 0, "", "")
 KEY_SLIDER("  seam width", 0.25f, 1, 0.05f, 2, &c.acid.filmHue2Seam, nullptr, "liquid_acid", "film_hue2_seam", false, "Width of the band where the film turns into the second (and third) hue. 1 = as before: a wide run through every hue in between (a 180 deg pair shows red and green stripes); 0.5 half; 0.33 one thin seam line (the proven photos' single yellow-orange line). Measured on Magenta/Mint at 1440p: seam crossing 118 px at 1, 52 px at 0.5, 37 px at 0.33 (brief BW)",
            G_COLOUR, "A", "liquid_acid.film_hue2_amt>0 || liquid_acid.film_hue3_amt>0", 0, "", "")
+KEY_SLIDER("  seam stretch (where it is wide)", 0, 8, 0.5f, 1, &c.acid.filmHue2SeamStretch, nullptr, "liquid_acid", "film_hue2_seam_stretch", false, "Widens the band between the two colours where it is already wide, and leaves it short where it is short. 0 = off. Not drawn while the leak below is above 0",
+           G_COLOUR, "A", "liquid_acid.film_hue2_amt>0", 0, "", "")
+KEY_SLIDER("  colour leak at the seam", 0, 1.5f, 0.05f, 2, &c.acid.filmHue2Leak, nullptr, "liquid_acid", "film_hue2_leak", false, "The second colour leaks out of its patch into the main colour: a tight band, then a leak at its edge. 0 = off (the stretch above is drawn instead)",
+           G_COLOUR, "A", "liquid_acid.film_hue2_amt>0", 0, "", "")
+KEY_SLIDER("    leak the other way", 0, 1.5f, 0.05f, 2, &c.acid.filmHue2LeakIn, nullptr, "liquid_acid", "film_hue2_leak_in", false, "The main colour leaks into the patch as well. 0 = one way only",
+           G_COLOUR, "A", "liquid_acid.film_hue2_amt>0 && liquid_acid.film_hue2_leak>0", 0, "", "")
+KEY_SLIDER("    leak reach", 0.05f, 0.5f, 0.01f, 2, &c.acid.filmHue2LeakReach, nullptr, "liquid_acid", "film_hue2_leak_reach", false, "How far a leak runs: it comes out short where the two colours meet steeply and long where they meet gently",
+           G_COLOUR, "A", "liquid_acid.film_hue2_amt>0 && liquid_acid.film_hue2_leak>0", 0, "", "")
+KEY_SLIDER("    seam core width (x)", 0.5f, 3, 0.1f, 1, &c.acid.filmHue2LeakCore, nullptr, "liquid_acid", "film_hue2_leak_core", false, "The hard band between the two colours, as a multiple of the plain seam width",
+           G_COLOUR, "A", "liquid_acid.film_hue2_amt>0 && liquid_acid.film_hue2_leak>0", 0, "", "")
 KEY_SLIDER("Third film hue (deg)", -180, 180, 5.0f, 0, &c.acid.filmHue3, nullptr, "liquid_acid", "film_hue3", false, "An optional third hue, taken off the other end of the SAME patch field so it costs nothing extra per pixel",
            G_COLOUR, "A", "liquid_acid.film_hue3_amt>0", 0, "", "")
 KEY_SLIDER("  third hue amount", 0, 1, 0.05f, 2, &c.acid.filmHue3Amt, nullptr, "liquid_acid", "film_hue3_amt", false, "0 = off, which is the default",
@@ -411,6 +421,10 @@ KEY_SLIDER("Big hollow bubbles (size x)", 1, 6, 0.1f, 2, &c.acid.dropletRingRMul
            G_DROPLETS, "A", "liquid_acid.droplets>0 && liquid_acid.droplet_ring_frac>0", 0, "", "")
 KEY_SLIDER("  big-ring share", 0, 0.3f, 0.005f, 3, &c.acid.dropletRingBigFrac, nullptr, "liquid_acid", "droplet_ring_big_frac", false, "Share of new rings that are big -- keep it small, a couple visible at a time is the point",
            G_DROPLETS, "A", "liquid_acid.droplets>0 && liquid_acid.droplet_ring_frac>0", 0, "", "")
+KEY_SLIDER("Medium black droplets (share)", 0, 0.1f, 0.005f, 3, &c.acid.dropletBigFrac, nullptr, "liquid_acid", "droplet_big_frac", false, "Share of the new solid droplets in the colour that are born medium: round, black, held apart from each other, with the small ones kept off their rim. 0 = none. A handful on screen is the point",
+           G_DROPLETS, "A", "liquid_acid.droplets>0", 0, "", "")
+KEY_SLIDER("  medium size (x)", 1, 6, 0.1f, 2, &c.acid.dropletBigRMul, nullptr, "liquid_acid", "droplet_big_r_mul", false, "A medium droplet is between 1.25 times the largest small droplet and this many times it, most of them near the small end. 1 = off",
+           G_DROPLETS, "A", "liquid_acid.droplets>0 && liquid_acid.droplet_big_frac>0", 0, "", "")
 KEY_SLIDER("Coalescence (touching drops merge)", 0, 1, 0.05f, 2, &c.acid.dropletCoalesce, nullptr, "liquid_acid", "droplet_coalesce", false, "Same-kind solid droplets that touch pour into one round droplet of the combined area instead of parking as a lumpy cluster of lobes (rings keep their foam walls)",
            G_DROPLETS, "A", "liquid_acid.droplets>0", 0, "", "")
 KEY_SLIDER("  neck close (s)", 0, 4, 0.1f, 2, &c.acid.dropletCoalesceS, nullptr, "liquid_acid", "droplet_coalesce_s", false, "Seconds the coalescence takes (0 = the old 0.18 s snap)",
@@ -569,6 +583,10 @@ KEY_SLIDER("Parallax second layer", 0, 1, 0.02f, 2, &c.ink.parallax, nullptr, "i
            G_INK, "AI", "look==I || liquid_acid.ink_water>0", KF_UNVERIFIED, "", "")
 KEY_SLIDER("Parallax scale", 0.8f, 1, 0.005f, 3, &c.ink.parallaxScale, nullptr, "ink", "parallax_scale", false, "How much bigger the second layer reads",
            G_INK, "AI", "(look==I || liquid_acid.ink_water>0) && ink.parallax>0", KF_UNVERIFIED, "", "")
+KEY_SLIDER("Ink only inside the black (oil look)", 0, 1, 1, 0, nullptr, &c.ink.blackOnly, "ink", "black_only", false, "1 = the ink shows only inside the black areas and the colour never reads it (no ink under the colour, no halos from it). 0 = the ink lies under everything",
+           G_INK, "A", "liquid_acid.ink_water>0", KF_UNVERIFIED, "", "")
+KEY_SLIDER("  ink in the colour next to it", 0, 1, 0.05f, 2, &c.ink.filmColour, nullptr, "ink", "film_colour", false, "0 = the pale ink (its two tints). 1 = the ink takes the colour the picture has at that spot, so it reads as the colour bleeding into the black as smoke",
+           G_INK, "A", "liquid_acid.ink_water>0 && ink.black_only>0", KF_UNVERIFIED, "", "")
 KEY_SLIDER("Interval (s)", 2, 90, 1, 0, &c.drops.interval, nullptr, "drops", "interval", false, "Seconds between ink drops (jittered +-35%)",
            G_FLUID, "FAI", "drops.drops>0", 0, "", "I")
 KEY_SLIDER("Entry speed (downward)", 0, 3000, 25, 0, &c.drops.speed, nullptr, "drops", "speed", false, "Downward velocity impulse. This is what rolls the head into a cap",
@@ -901,5 +919,13 @@ KEY_CHECK("Ink drops", &c.drops.enabled, "drops", "drops", "Periodic falling ink
           G_FLUID, "FAI", "", 0, "", "I")
 KEY_CHECK("Drops obey the fullness governor", &c.drops.obeyGovernor, "drops", "obey_governor", "Skip a drop while the water is already full of ink",
           G_FLUID, "FAI", "drops.drops>0", 0, "", "")
+KEY_SLIDER("Drops land inside the black (margin)", 0, 0.2f, 0.01f, 2, &c.drops.inBlack, nullptr, "drops", "in_black", false, "Oil look: every drop lands inside a black area, at least this far (in screen heights) from the colour, anywhere on screen. 0 = the entry band at the top",
+           G_FLUID, "A", "drops.drops>0", KF_UNVERIFIED, "", "")
+KEY_SLIDER("Ink rides up with the picture", 0, 1.5f, 0.05f, 2, &c.drops.inkRise, nullptr, "drops", "ink_rise", false, "Oil look: the ink alone drifts up at this share of the picture's own climb, so it does not slide out of its black area. 0 = off",
+           G_FLUID, "A", "drops.drops>0", KF_UNVERIFIED, "", "")
+KEY_SLIDER("Drop push", 0, 1, 0.05f, 2, &c.drops.impulse, nullptr, "drops", "impulse", false, "How much of its current a drop adds to the liquid. 1 = all of it (the drop rolls into a cap and stirs everything near it). 0 = ink only: nothing else is pushed",
+           G_FLUID, "FAI", "drops.drops>0", KF_UNVERIFIED, "", "")
+KEY_SLIDER("Ink swirl", 0, 0.05f, 0.001f, 3, &c.drops.inkSwirl, nullptr, "drops", "ink_swirl", false, "Oil look: a slow current of its own that carries the ink alone and curls it into smoke (screen heights per second). Nothing else feels it. 0 = off",
+           G_FLUID, "A", "drops.drops>0", KF_UNVERIFIED, "", "")
 KEY_CHECK("Start with Windows", nullptr, "system", "autostart", "Start the wallpaper when you sign in (HKCU Run key)",
           G_SYSTEM, "FAI", "", KF_MACHINE|KF_GLOBAL, "autostart", "")

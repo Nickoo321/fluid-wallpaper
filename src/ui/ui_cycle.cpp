@@ -9,6 +9,7 @@
 #include <cmath>
 #include <cstdio>
 #include <cstdlib>
+#include <map>
 #include <utility>
 #include "ui_cycle.h"
 #include "ui_model.h"
@@ -50,7 +51,8 @@ ULONGLONG         s_lastMove[UA_COUNT] = {};
 unsigned LookOfStage(int cycleLook) {
     return cycleLook == CYCLE_LOOK_ACID ? LOOK_A : cycleLook == CYCLE_LOOK_INK ? LOOK_I : LOOK_F;
 }
-bool Valid(int i) { return i >= 0 && i < (int)CycleGet().stages.size(); }
+// the owner's stages only: a guest visit's stage (always the list's last entry, cycle.h CycleVisitGuest) is not one
+bool Valid(int i) { return i >= 0 && i < CycleListedCount(); }
 bool SamePath(const std::wstring& a, const std::wstring& b) { return _wcsicmp(a.c_str(), b.c_str()) == 0; }
 } // namespace
 
@@ -73,15 +75,62 @@ std::string UiStillName(int i) {
     for (char& c : s) if (c == '_') c = ' ';
     return s;
 }
-int UiStillRating(int i, int mode) { return (int)lroundf(DirectorLookRating(i, mode)); }
+// headless: a scripted rating is memory only, and every config load re-reads the --ini's [looks] (main.cpp ->
+// DirectorLoadLooks), which would undo it between the script and the shot; the window shows the scripted value
+static std::map<std::pair<int, int>, int> s_roRating;
+int UiStillRating(int i, int mode) {
+    if (g_configReadOnly) {
+        auto it = s_roRating.find({ i, mode ? 1 : 0 });
+        if (it != s_roRating.end()) return it->second;
+    }
+    return (int)lroundf(DirectorLookRating(i, mode));
+}
 void UiSetStillRating(int i, int mode, int v) {
     DirectorSetLookRating(i, mode, (float)v);
+    // confusion 33 (UI3-PLAN): a headless run (--ui-shot / --ui-dump) changes the rating in memory only
+    if (g_configReadOnly) { s_roRating[{ i, mode ? 1 : 0 }] = (int)lroundf(DirectorLookRating(i, mode)); return; }
+    if (!g_iniPath[0]) return;
     wchar_t key[160], val[16];
     _snwprintf_s(key, _TRUNCATE, L"%s_%s", DirectorLookName(i).c_str(), mode ? L"pair" : L"white");
     _snwprintf_s(val, _TRUNCATE, L"%d", UiStillRating(i, mode));
     WritePrivateProfileStringW(L"looks", key, val, g_iniPath);
 }
-bool UiStillPoolOn() { return g_renderer && g_renderer->Config().acid.directorDarkPath == 2; }
+// the rated look stages (cycle.h stage_N_rating): the cycle owns the ratings and persists them in [looks]
+int UiRatedCount() { return CycleRatedCount(); }
+std::string UiRatedName(int k) {
+    const int j = CycleRatedStage(k);
+    if (j < 0) return std::string();
+    std::string s = UiNarrow(CycleGet().stages[j].name);
+    if (s.rfind("Look - ", 0) == 0) s.erase(0, 7);              // the preset files are named "Look - <name>.ini"
+    for (char& c : s) c = (char)tolower((unsigned char)c);
+    return s;
+}
+int UiRatedRating(int k) { return (int)lroundf(CycleRatedRating(k)); }
+void UiSetRatedRating(int k, int v) { CycleSetRatedRating(k, (float)v); }
+void UiShowRated(int k) {
+    const int j = CycleRatedStage(k);
+    if (j >= 0) CycleJump(j);
+}
+// headless (--ui-queue, the layout proof of the "show next" block): the pool counts as on and the Now line is this text
+static bool        s_headlessPool = false;
+static std::string s_headlessNow;
+void UiQueueHeadless(const std::string& now) { s_headlessPool = true; s_headlessNow = now; }
+bool UiStillPoolOn() { return g_renderer ? g_renderer->Config().acid.directorDarkPath == 2 : s_headlessPool; }
+// "show next": the queue lives in the colour director (DirectorQueueLook)
+void UiQueueStill(int i, int mode) { DirectorQueueLook(i, mode); }
+int  UiQueueCount() { return DirectorQueueCount(); }
+bool UiQueueAt(int k, int* i, int* mode) { return DirectorQueueAt(k, i, mode); }
+void UiQueueClear() { DirectorQueueClear(); }
+std::string UiQueueText() {
+    std::string s;
+    int i = 0, m = 0;
+    for (int k = 0; DirectorQueueAt(k, &i, &m); k++) {
+        if (k) s += ", then ";
+        s += UiStillName(i) + (m ? " darkroom" : " vivid");
+    }
+    return s;
+}
+std::string UiNowLookText() { return g_renderer ? DirectorNowText() : s_headlessNow; }
 
 std::wstring UiPresetsDir() {
     wchar_t dir[MAX_PATH];
@@ -99,7 +148,7 @@ UiCycleStatusView UiCycleStatus() {
     v.on = s.phase != CYCLE_OFF;
     v.stage = s.stage;
     v.next = s.next;
-    v.count = (int)CycleGet().stages.size();
+    v.count = CycleListedCount();          // ui3: a guest visit's stage is not counted
     v.phase = s.phase;
     v.remainingSec = s.remainingSec;
     v.transitioning = s.transitioning;
@@ -109,7 +158,7 @@ UiCycleStatusView UiCycleStatus() {
     return v;
 }
 
-int UiCycleStageCount() { return (int)CycleGet().stages.size(); }
+int UiCycleStageCount() { return CycleListedCount(); }   // ui3: the playlist never shows a guest visit's stage
 
 UiStageInfo UiCycleStage(int i) {
     UiStageInfo o;
@@ -124,6 +173,7 @@ UiStageInfo UiCycleStage(int i) {
     o.weight = st.weight;
     o.tier = st.tier;
     o.fluid = !st.overlay && st.look == CYCLE_LOOK_FLUID;
+    o.rated = !st.rateKey.empty() && !st.overlay && !st.photo;
     return o;
 }
 bool UiCycleTierMode() {
@@ -183,7 +233,7 @@ void UiCycleAddStage(const std::wstring& path, const std::wstring& base, bool ov
     CycleSet(c);
 }
 bool UiCycleHasFile(const std::wstring& path) {
-    for (auto& st : CycleGet().stages) if (SamePath(st.path, path)) return true;
+    for (auto& st : CycleGet().stages) if (!st.guest && SamePath(st.path, path)) return true;
     return false;
 }
 void UiCycleSetFileIncluded(const std::wstring& path, bool on) { CycleSetStageIncluded(path, on, 180.0f); }
@@ -292,7 +342,7 @@ std::string UiCycleScript(const std::string& cmdIn, FluidConfig& cfg) {
         s_scriptStatus.on = true;
         s_scriptStatus.scripted = true;
         s_scriptStatus.stage = st;
-        s_scriptStatus.count = (int)CycleGet().stages.size();
+        s_scriptStatus.count = CycleListedCount();
         s_scriptStatus.phase = CYCLE_DWELL;
         s_scriptStatus.remainingSec = (float)atof(w[3]);
         s_scriptStatus.paused = cmdIn.find("paused") != std::string::npos;
@@ -360,3 +410,226 @@ std::string UiCycleScript(const std::string& cmdIn, FluidConfig& cfg) {
     }
     return "unknown command";
 }
+
+// ============================================================================ ui3 HOME (2026-11-23)
+namespace {
+bool      s_nowScripted = false;
+UiNowView s_nowScript;
+// "Never"'s memory: ini key -> value; -1 = cleared (the ini copy is ignored from then on)
+std::map<std::wstring, int> s_beforeNever;
+const wchar_t* LooksReadIni() { return g_configIniPath[0] ? g_configIniPath : g_iniPath; }
+bool BnGet(const std::wstring& key, int* v) {
+    auto it = s_beforeNever.find(key);
+    if (it != s_beforeNever.end()) { if (it->second < 0) return false; *v = it->second; return true; }
+    wchar_t b[32] = {};
+    if (GetPrivateProfileStringW(L"looks", key.c_str(), L"", b, 32, LooksReadIni()) <= 0) return false;
+    *v = (int)lroundf(fminf(fmaxf((float)_wtof(b), 0.0f), 10.0f));
+    return true;
+}
+void BnSet(const std::wstring& key, int v) {
+    s_beforeNever[key] = v;
+    if (g_configReadOnly || !g_iniPath[0]) return;
+    wchar_t val[16];
+    _snwprintf_s(val, _TRUNCATE, L"%d", v);
+    WritePrivateProfileStringW(L"looks", key.c_str(), val, g_iniPath);
+}
+void BnClear(const std::wstring& key) {
+    s_beforeNever[key] = -1;
+    if (g_configReadOnly || !g_iniPath[0]) return;
+    WritePrivateProfileStringW(L"looks", key.c_str(), nullptr, g_iniPath);   // the key goes
+}
+std::wstring StillBnKey(int i, int mode) { return DirectorLookName(i) + (mode ? L"_pair_before_never" : L"_white_before_never"); }
+std::wstring RatedBnKey(int k) {
+    const int j = CycleRatedStage(k);
+    return j >= 0 ? CycleGet().stages[j].rateKey + L"_before_never" : std::wstring();
+}
+} // namespace
+
+UiNowView UiDirectorNow() {
+    if (s_nowScripted) return s_nowScript;
+    UiNowView v;
+    if (!g_renderer) return v;
+    const DirectorView d = DirectorNow();
+    v.director = d.active && d.combo >= 0;
+    v.combo = d.combo; v.mode = d.mode; v.changing = d.changing;
+    v.toCombo = d.toCombo; v.toMode = d.toMode;
+    v.nextCombo = d.nextCombo; v.nextMode = d.nextMode;
+    v.holdLeftSec = d.holdLeftSec; v.keepLeftSec = d.keepLeftSec;
+    return v;
+}
+void UiDirectorNowScript(const UiNowView& v) { s_nowScripted = true; s_nowScript = v; s_nowScript.scripted = true; }
+std::string UiStillKey(int i) { return UiNarrow(DirectorLookName(i)); }
+int UiStillFind(const std::string& key) {
+    int hit = -1;                                  // a listed pair first (a removed one may share its name)
+    for (int i = 0; i < UiStillCount(); i++)
+        if (_stricmp(UiStillKey(i).c_str(), key.c_str()) == 0) { if (UiPairVisible(i)) return i; if (hit < 0) hit = i; }
+    return hit;
+}
+float UiStillAnchor(int i) { return DirectorLookAnchor(i); }
+float UiStillOffset(int i) { return DirectorLookOffset(i); }
+void  UiDirectorSkip() { if (!s_scripted && g_renderer) DirectorSkip(); }
+bool UiStillBeforeNever(int i, int* white, int* pair) {
+    int w = 0, p = 0;
+    const bool hw = BnGet(StillBnKey(i, 0), &w), hp = BnGet(StillBnKey(i, 1), &p);
+    if (!hw && !hp) return false;
+    if (white) *white = hw ? w : 5;
+    if (pair) *pair = hp ? p : 5;
+    return true;
+}
+void UiSetStillBeforeNever(int i, int white, int pair) { BnSet(StillBnKey(i, 0), white); BnSet(StillBnKey(i, 1), pair); }
+void UiClearStillBeforeNever(int i) { BnClear(StillBnKey(i, 0)); BnClear(StillBnKey(i, 1)); }
+bool UiRatedBeforeNever(int k, int* v) { const std::wstring key = RatedBnKey(k); return !key.empty() && BnGet(key, v); }
+void UiSetRatedBeforeNever(int k, int v) { const std::wstring key = RatedBnKey(k); if (!key.empty()) BnSet(key, v); }
+void UiClearRatedBeforeNever(int k) { const std::wstring key = RatedBnKey(k); if (!key.empty()) BnClear(key); }
+bool UiLoadCombosFrom(const std::wstring& ini) { return DirectorLoadCombosFrom(ini.c_str()); }
+
+// ---- ui3 add / remove a pair -------------------------------------------------------------------------------------
+namespace {
+std::wstring s_appdataOverride;                    // --ui-appdata <dir> (headless only)
+std::string  s_lastPairWrite;
+// the two files this feature writes, and whether it may write them
+void PairTargets(std::wstring& combos, std::wstring& settings, bool& readOnly) {
+    if (!s_appdataOverride.empty()) {
+        combos = s_appdataOverride + L"\\combos.ini";
+        settings = s_appdataOverride + L"\\settings.ini";
+        readOnly = false;                          // the scratch folder: these two writes only
+        return;
+    }
+    settings = g_iniPath;                          // %APPDATA%\FluidWallpaper\settings.ini (main.cpp InitSettingsPath)
+    combos.clear();
+    if (g_iniPath[0]) {
+        combos = g_iniPath;
+        const size_t sl = combos.find_last_of(L"\\/");
+        combos = (sl == std::wstring::npos ? std::wstring(L".") : combos.substr(0, sl)) + L"\\combos.ini";
+    }
+    readOnly = g_configReadOnly || combos.empty() || settings.empty();
+}
+void ForgetScriptedRating(int i) { s_roRating.erase({ i, 0 }); s_roRating.erase({ i, 1 }); }
+} // namespace
+bool UiPairVisible(int i) { return i >= 0 && i < UiStillCount() && !DirectorComboHidden(i) && !DirectorComboIsDraft(i); }
+bool UiPairIsDraft(int i) { return DirectorComboIsDraft(i) && !DirectorComboHidden(i); }
+bool UiPairBuiltIn(int i) { return DirectorComboIsBuiltIn(i); }
+bool UiPairInFlight(int i) { return DirectorComboInFlight(i); }
+std::string UiPairSource() { return UiNarrow(DirectorComboSource()); }
+std::string UiHueName(float hue) { return DirectorHueName(hue); }
+std::string UiPairKeyFor(const std::string& display, int ignore) { return UiNarrow(DirectorComboKeyFor(UiWide(display), ignore)); }
+int UiPairAdd(const std::string& display, float anchor, float offset, bool draft) {
+    const int i = DirectorAddCombo(UiWide(display), anchor, offset, draft);
+    ForgetScriptedRating(i);
+    return i;
+}
+bool UiPairUpdateDraft(int i, const std::string& display, float anchor, float offset) {
+    return DirectorUpdateDraft(i, UiWide(display), anchor, offset);
+}
+void UiPairCancel(int i) {
+    if (!DirectorComboIsDraft(i)) return;
+    DirectorHideCombo(i);
+    ForgetScriptedRating(i);
+}
+std::string UiPairKeep(int i) {
+    DirectorCommitCombo(i);
+    ForgetScriptedRating(i);
+    std::wstring combos, settings;
+    bool ro = true;
+    PairTargets(combos, settings, ro);
+    s_lastPairWrite = DirectorPersistKeep(i, combos.c_str(), settings.c_str(), ro);
+    return s_lastPairWrite;
+}
+std::string UiPairRemove(int i) {
+    if (i < 0 || i >= UiStillCount() || DirectorComboIsBuiltIn(i)) return "refused";
+    const UiNowView nv = UiDirectorNow();
+    const bool playing = nv.director && nv.combo == i;
+    if (playing) UiKeep(0.0f);                     // a keep of it goes first, so the NEXT below is taken
+    DirectorHideCombo(i);
+    ForgetScriptedRating(i);
+    s_beforeNever[StillBnKey(i, 0)] = -1;          // its Never memory goes with it
+    s_beforeNever[StillBnKey(i, 1)] = -1;
+    if (playing) UiDirectorSkip();                 // on screen: ratings 0 + skip (on its way: it lands, then leaves)
+    std::wstring combos, settings;
+    bool ro = true;
+    PairTargets(combos, settings, ro);
+    s_lastPairWrite = DirectorPersistRemove(i, combos.c_str(), settings.c_str(), ro);
+    return s_lastPairWrite;
+}
+std::string UiPairLastWrite() { return s_lastPairWrite; }
+float UiStillRatingDirector(int i, int mode) { return DirectorLookRating(i, mode); }
+void UiSetAppdataOverride(const std::wstring& dir) { s_appdataOverride = dir; }
+
+// ---- ui3 Keep this and visits ----------------------------------------------------------------------------------
+// Live: the cycle's own calls (CycleKeepThis / CycleVisit decide what holds). Headless (no renderer, nothing ticks):
+// the same hold state is set from the scripted view, so a click shows what the window would show; no jump happens.
+void UiKeep(float sec) {
+    if (g_renderer) { CycleKeepThis(sec); return; }
+    if (!(sec > 0.0f)) {
+        if (!CycleHoldIsVisit()) CycleHold(0.0f);
+        DirectorKeep(0.0f);
+        return;
+    }
+    if (UiCycleOn()) CycleHold(sec);
+    if (UiDirectorNow().director) DirectorKeep(sec);
+}
+float UiKeepLeftSec() {
+    const float c = CycleHoldIsVisit() ? 0.0f : CycleHoldLeftSec();
+    return fmaxf(c, DirectorKeepLeftSec());
+}
+static const std::wstring& GuestPresetCached(int kind, std::string* why);   // below
+UiVisitView UiVisitNow() {
+    UiVisitView v;
+    if (!CycleHoldIsVisit() || !(CycleHoldLeftSec() > 0.0f)) return v;
+    const int g = CycleGuestStage();
+    if (g >= 0 && CycleHoldStage() == g) {   // a visit to Ink / Fluid: which one, by its preset file
+        const std::wstring f = CycleGuestFile();
+        for (int kind = 0; kind < 2; kind++) {
+            const std::wstring& p = GuestPresetCached(kind, nullptr);
+            if (!p.empty() && SamePath(p, f)) { v.on = true; v.guest = kind; v.leftSec = CycleHoldLeftSec(); }
+        }
+        return v;
+    }
+    for (int k = 0; k < CycleRatedCount(); k++)
+        if (CycleRatedStage(k) == CycleHoldStage()) { v.on = true; v.rated = k; v.leftSec = CycleHoldLeftSec(); }
+    return v;
+}
+void UiVisit(int ratedK, float sec) {
+    const int j = CycleRatedStage(ratedK);
+    if (j < 0) return;
+    if (g_renderer) { CycleVisit(j, sec); return; }
+    DirectorKeep(0.0f);
+    CycleHold(sec, true, j);
+}
+void UiVisitEnd() {
+    CycleVisitEndNow();
+    // headless (nothing ticks): a guest visit is let go at once, which takes the guest out of the list (cycle.cpp)
+    if (!g_renderer && CycleGuestStage() >= 0) CycleHold(0.0f);
+}
+// ---- ui3 visits to Ink / Fluid ----------------------------------------------------------------------------------
+// the start preset of Ink (0) / Fluid (1): the folder scan at most once a second per look (HOME asks every frame)
+static const std::wstring& GuestPresetCached(int kind, std::string* why) {
+    static ULONGLONG at[2] = {};
+    static std::wstring path[2];
+    static std::string reason[2];
+    const ULONGLONG now = GetTickCount64();
+    if (!at[kind] || now - at[kind] > 1000) {
+        reason[kind].clear();
+        path[kind] = CycleGuestPreset(kind, &reason[kind]);
+        at[kind] = now;
+    }
+    if (why) *why = reason[kind];
+    return path[kind];
+}
+bool UiGuestAvailable(int kind, std::string* why) {
+    if (kind < 0 || kind > 1) return false;
+    return !GuestPresetCached(kind, why).empty();
+}
+void UiVisitGuest(int kind, float sec) {
+    std::string why;
+    const std::wstring p = CycleGuestPreset(kind, &why);
+    if (p.empty()) return;
+    CycleVisitGuest(p, sec);                 // live: the jump and the hold; headless: appended and held (no jump)
+}
+int UiGuestStage() { return CycleGuestStage(); }
+std::string UiGuestFile() {
+    const std::wstring f = CycleGuestFile();
+    const size_t sl = f.find_last_of(L"\\/");
+    return UiNarrow(sl == std::wstring::npos ? f : f.substr(sl + 1));
+}
+int UiCycleStageCountAll() { return (int)CycleGet().stages.size(); }

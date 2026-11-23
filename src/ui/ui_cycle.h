@@ -25,6 +25,22 @@ std::string UiStillName(int i);
 int         UiStillRating(int i, int mode);
 void        UiSetStillRating(int i, int mode, int v);
 bool        UiStillPoolOn();         // the running look draws its next rest by these ratings (director_dark_path 2)
+// The rated look stages (the idea looks; cycle.h stage_N_rating; user 2026-11-23: "its jsut a low rating"): rows of
+// the same table, one rating each (a shape, in whatever colours are running).
+int         UiRatedCount();
+std::string UiRatedName(int k);
+int         UiRatedRating(int k);
+void        UiSetRatedRating(int k, int v);
+void        UiShowRated(int k);      // "show next": the cycle fades to it now
+// "show next" (user 2026-11-21: "in the ui can i queue stuff?", "ok add that"): line a look up; the director takes
+// the front of the line instead of drawing by rating. Not saved: a queue is for now.
+void        UiQueueStill(int i, int mode);
+int         UiQueueCount();
+bool        UiQueueAt(int k, int* i, int* mode);   // the k-th entry of the queue (false = none)
+std::string UiQueueText();           // "blue coral darkroom, then teal orange vivid"
+void        UiQueueClear();
+std::string UiNowLookText();         // what is on screen in plain words ("" = no colour director running)
+void        UiQueueHeadless(const std::string& now);   // --ui-queue: no renderer, the block shown with this Now text
 
 std::wstring UiPresetsDir();         // the one preset folder (%APPDATA%\FluidWallpaper\presets)
 void   UiPresetsRescan();            // after a Save / Save as (no-op: nothing caches it)
@@ -46,6 +62,7 @@ struct UiStageInfo {
     float weight = 1.0f;                      // tier mode: the multiplier inside the tier
     int   tier = -1;                          // stage_N_tier: -1 none, 0 proven, 1 moderate, 2 wild
     bool  fluid = false;                      // a WE look stage (alternates; not drawn by tier)
+    bool  rated = false;                      // a rated look stage (stage_N_rating): drawn by its LOOKS rating
 };
 struct UiCycleStatusView {
     bool  on = false;
@@ -114,6 +131,69 @@ struct UiLiveValues {
     unsigned moving = 0;      // bit (1 << UiAnim): changed within the last ~2 s
 };
 UiLiveValues UiLive();
+
+// ---- ui3 HOME (2026-11-23): the colour director as the HOME screen reads it ---------------------------------
+struct UiNowView {
+    bool  director = false;        // a colour pair is on screen (the colour director runs)
+    int   combo = -1, mode = 0;    // the pair on screen; 0 vivid, 1 darkroom
+    bool  changing = false;        // a change is on screen (no hold)
+    int   toCombo = -1, toMode = 0;      // where that change goes (-1 unknown)
+    int   nextCombo = -1, nextMode = 0;  // during a hold: the front of the queue (-1 = drawn at random)
+    float holdLeftSec = -1.0f;     // the hold on screen, seconds left (-1 = not a hold)
+    float keepLeftSec = 0.0f;
+    bool  scripted = false;
+};
+UiNowView   UiDirectorNow();
+void        UiDirectorNowScript(const UiNowView& v);   // headless "now ...": replaces the director's view
+std::string UiStillKey(int i);       // the combo's own name ("blue_coral")
+int         UiStillFind(const std::string& key);   // index of a combo name, -1 = none
+float       UiStillAnchor(int i);    // the film hue (deg)
+float       UiStillOffset(int i);    // the second colour = anchor + offset
+void        UiDirectorSkip();        // NEXT for the director alone (Never on the pair that is playing)
+// "Never": the ratings a pair had before, kept in settings.ini [looks] <combo>_white_before_never /
+// <combo>_pair_before_never (the director reads only the exact _white / _pair keys). Memory first; written to
+// settings.ini only when the config is writable (never headless).
+bool        UiStillBeforeNever(int i, int* white, int* pair);
+void        UiSetStillBeforeNever(int i, int white, int pair);
+void        UiClearStillBeforeNever(int i);
+bool        UiRatedBeforeNever(int k, int* v);    // <rateKey>_before_never
+void        UiSetRatedBeforeNever(int k, int v);
+void        UiClearRatedBeforeNever(int k);
+// --ui-combos <ini>: the pair list for a headless shot (before anything loads the list)
+bool        UiLoadCombosFrom(const std::wstring& ini);
+// ---- ui3 add / remove a pair (director.h DirectorAddCombo ...). Indices are the director's; a pair the window
+// lists is a VISIBLE one (neither a draft nor removed). Writes go to %APPDATA%\FluidWallpaper\combos.ini and
+// settings.ini [looks], never while the config is read-only (headless), except under --ui-appdata <dir> (headless
+// only: both files of this feature go to that folder and these two writes are allowed).
+bool        UiPairVisible(int i);
+bool        UiPairIsDraft(int i);
+bool        UiPairBuiltIn(int i);
+bool        UiPairInFlight(int i);
+std::string UiPairSource();
+std::string UiHueName(float hue);
+std::string UiPairKeyFor(const std::string& display, int ignore);   // the name the pair would be stored under
+int         UiPairAdd(const std::string& display, float anchor, float offset, bool draft);
+bool        UiPairUpdateDraft(int i, const std::string& display, float anchor, float offset);
+void        UiPairCancel(int i);                  // a draft: hidden (memory only; it was never written)
+std::string UiPairKeep(int i);                    // commit (ratings 5) + persist; the line says what was written
+std::string UiPairRemove(int i);                  // hide (+ a keep let go and NEXT if it plays) + persist
+std::string UiPairLastWrite();                    // the last Keep / Remove line (for --ui-dump)
+float       UiStillRatingDirector(int i, int mode);   // the director's own value (--ui-dump; no headless cache)
+void        UiSetAppdataOverride(const std::wstring& dir);
+// ---- ui3 Keep this and visits (cycle.h CycleKeepThis / CycleVisit; headless: the same hold state, no jump) --------
+void        UiKeep(float sec);       // Keep this for sec s (the stage timer + the colour director's hold); <= 0 lets go
+float       UiKeepLeftSec();         // 0 = no keep
+// guest = 0 Ink / 1 Fluid: a visit to a look that is not a stage (cycle.h CycleVisitGuest); rated = -1 then
+struct UiVisitView { bool on = false; int rated = -1; float leftSec = 0.0f; int guest = -1; };
+UiVisitView UiVisitNow();            // a visit to a rated look (k = 0 .. UiRatedCount()-1) or to Ink / Fluid, and its time left
+void        UiVisit(int ratedK, float sec);
+void        UiVisitEnd();            // "Back to automatic now" / its X (headless: a guest visit is let go at once)
+// ---- ui3 visits to Ink / Fluid (kind 0 / 1): the start preset (CycleGuestPreset) and the guest visit ------------
+bool        UiGuestAvailable(int kind, std::string* why);   // false + why: the preset file is nowhere (the chip is off)
+void        UiVisitGuest(int kind, float sec);              // live: the cycle fades to it; headless: appended + held
+int         UiGuestStage();          // the guest stage's 0-based index in the director's list, -1 = none
+std::string UiGuestFile();           // its preset file name ("" = none)
+int         UiCycleStageCountAll();  // every stage the director holds, a guest included (--ui-dump)
 
 // headless only
 void         UiCycleLoadHeadless(const wchar_t* ini);

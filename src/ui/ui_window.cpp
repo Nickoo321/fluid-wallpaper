@@ -36,6 +36,7 @@ void WpLog(const char* fmt, ...);   // main.cpp: %APPDATA%\FluidWallpaper\FluidW
 #include "../app_state.h"
 #include "ui_cycle.h"
 #include "ui_presets.h"
+#include "ui_home.h"
 
 #pragma comment(lib, "d3d11.lib")
 #pragma comment(lib, "dxgi.lib")
@@ -159,6 +160,7 @@ void LoadFonts() {
         mc.MergeMode = true;
         io.Fonts->AddFontFromFileTTF("C:\\Windows\\Fonts\\seguisym.ttf", 16.0f, &mc);
     }
+    UiHomeLoadFonts();              // ui3: Schibsted Grotesk for the new screens (after the default font)
     io.IniFilename = nullptr;       // no imgui.ini next to the exe
     io.LogFilename = nullptr;
 }
@@ -1045,6 +1047,7 @@ struct Tier { const char* name; float w; };
 const Tier kTiers[] = { { "proven", 7.0f }, { "moderate", 2.0f }, { "wild", 1.0f } };
 std::string TierLabel(const UiStageInfo& st, bool tierMode) {
     if (st.fluid && tierMode) return "WE (alternates)";
+    if (st.rated) return "rated";
     if (st.tier >= 0 && st.tier < 3) return kTiers[st.tier].name;
     return tierMode ? "wild (default)" : "none";
 }
@@ -1060,15 +1063,42 @@ void DrawLooks() {
     ImGui::TextColored(kDim, "Rate each look 0 to 10. The next look is drawn by rating: twice the rating comes up twice as often, 0 never.");
     if (!UiStillPoolOn())
         ImGui::TextColored(kDim, "(Not in use by the look that is running now: it still plays its old order.)");
+    // "show next" (user 2026-11-21: "in the ui can i queue stuff?", "ok add that"): only while the rated pool runs
+    const bool queueOn = UiStillPoolOn();
+    if (queueOn) {
+        const std::string now = UiNowLookText();
+        if (!now.empty()) ImGui::TextColored(kAccent, "Now: %s", now.c_str());
+        if (UiQueueCount() > 0) {
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("Up next: %s", UiQueueText().c_str());
+            ImGui::SameLine();
+            if (ImGui::SmallButton("clear the queue")) UiQueueClear();
+        } else {
+            ImGui::TextColored(kDim, "Click \"show next\" on a look to show it next; click several to line them up.");
+        }
+    }
     int sum = 0;
     for (int i = 0; i < n; i++) sum += UiStillRating(i, 0) + UiStillRating(i, 1);
+    // the rated look stages (the idea looks): their ratings count in the same sum, so every chance in the table is
+    // that look's share of the time
+    const int nr = UiRatedCount();
+    for (int k = 0; k < nr; k++) sum += UiRatedRating(k);
     if (ImGui::BeginTable("looks", 5, ImGuiTableFlags_RowBg | ImGuiTableFlags_SizingStretchProp)) {
         const float fs = ImGui::GetFontSize();
-        ImGui::TableSetupColumn("colour pair", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+        if (queueOn) {   // the name column as wide as the longest name: a stretch share clipped "magenta mint" in a
+                         // 1280-wide window once the "show next" buttons took their room
+            float nameW = ImGui::CalcTextSize("colour pair").x;
+            for (int i = 0; i < n; i++) nameW = fmaxf(nameW, ImGui::CalcTextSize(UiStillName(i).c_str()).x);
+            for (int k = 0; k < nr; k++) nameW = fmaxf(nameW, ImGui::CalcTextSize(UiRatedName(k).c_str()).x);
+            ImGui::TableSetupColumn("colour pair", ImGuiTableColumnFlags_WidthFixed, nameW + fs * 0.6f);
+        } else {
+            ImGui::TableSetupColumn("colour pair", ImGuiTableColumnFlags_WidthStretch, 0.26f);
+        }
         ImGui::TableSetupColumn("vivid (white light)", ImGuiTableColumnFlags_WidthStretch, 0.37f);
-        ImGui::TableSetupColumn("rating, chance", ImGuiTableColumnFlags_WidthFixed, fs * 6.4f);
+        const float rw = fs * (queueOn ? 11.6f : 6.4f);   // room for the "show next" button
+        ImGui::TableSetupColumn("rating, chance", ImGuiTableColumnFlags_WidthFixed, rw);
         ImGui::TableSetupColumn("darkroom (two lights)", ImGuiTableColumnFlags_WidthStretch, 0.37f);
-        ImGui::TableSetupColumn("rating, chance ", ImGuiTableColumnFlags_WidthFixed, fs * 6.4f);
+        ImGui::TableSetupColumn("rating, chance ", ImGuiTableColumnFlags_WidthFixed, rw);
         ImGui::TableHeadersRow();
         for (int i = 0; i < n; i++) {
             ImGui::PushID(i);
@@ -1088,7 +1118,37 @@ void DrawLooks() {
                 ImGui::Text("%d/10", UiStillRating(i, m));
                 ImGui::SameLine();
                 ImGui::TextColored(kDim, "%.0f %%", ch);
+                if (queueOn) {
+                    ImGui::SameLine();
+                    if (ImGui::SmallButton(m ? "show next##pair" : "show next##white")) UiQueueStill(i, m);
+                }
             }
+            ImGui::PopID();
+        }
+        // the rated look stages (the idea looks; user 2026-11-23: "well its jsut a low rating. thats all"): one
+        // rating each; the look is a shape and runs in whatever colours the director is on
+        for (int k = 0; k < nr; k++) {
+            ImGui::PushID(1000 + k);
+            ImGui::TableNextRow();
+            ImGui::TableSetColumnIndex(0);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextUnformatted(UiRatedName(k).c_str());
+            ImGui::TableSetColumnIndex(1);
+            int v = UiRatedRating(k);
+            ImGui::SetNextItemWidth(-FLT_MIN);
+            if (ImGui::SliderInt("##rated", &v, 0, 10, "")) UiSetRatedRating(k, v);
+            ImGui::TableSetColumnIndex(2);
+            ImGui::AlignTextToFramePadding();
+            ImGui::Text("%d/10", UiRatedRating(k));
+            ImGui::SameLine();
+            ImGui::TextColored(kDim, "%.0f %%", sum > 0 ? 100.0f * (float)UiRatedRating(k) / (float)sum : 0.0f);
+            if (UiCycleStatus().on) {
+                ImGui::SameLine();
+                if (ImGui::SmallButton("show next##rated")) UiShowRated(k);
+            }
+            ImGui::TableSetColumnIndex(3);
+            ImGui::AlignTextToFramePadding();
+            ImGui::TextColored(kDim, "any colours");
             ImGui::PopID();
         }
         ImGui::EndTable();
@@ -1102,7 +1162,10 @@ void DrawPlaylist() {
         UiStageInfo cur = UiCycleStage(cs.stage);
         std::string line = "Now " + std::to_string(cs.stage + 1) + "/" + std::to_string(cs.count) + "  " +
                            UiNarrow(cur.name) + "  (" + (cur.overlay ? "overlay" : UiLookName(cur.look)) + ")  \xC2\xB7  ";
-        if (cs.phase == 1) line += MinSec(cs.remainingSec) + " left";
+        // ui3: a visit to Ink / Fluid runs a guest stage that is not in this playlist
+        if (cs.stage >= 0 && cs.stage == UiGuestStage()) line = "Now a visit: " + UiGuestFile() + " (not in the playlist)  \xC2\xB7  ";
+        if (cs.phase == 1 && cs.stage >= 0 && cs.stage == UiGuestStage()) line += "back to automatic when the visit ends";
+        else if (cs.phase == 1) line += MinSec(cs.remainingSec) + " left";
         else if (cs.lerp) line += "gliding to " + UiNarrow(UiCycleStage(cs.next).name);
         else line += "fading";
         ImGui::TextColored(kAccent, "%s", line.c_str());
@@ -1411,14 +1474,18 @@ void DrawHeader() {
     }
 }
 
+// ADVANCED (ui3): today's whole window, one line on top for the way back to HOME.
 // header strip across the top; LEFT tiles | CENTRE selected mode | RIGHT outside-any-mode (D1)
-void DrawUi(float w, float h) {
+void DrawAdvancedUi(float w, float h) {
     ImGui::SetNextWindowPos(ImVec2(0, 0));
     ImGui::SetNextWindowSize(ImVec2(w, h));
     ImGui::Begin("##settings", nullptr, ImGuiWindowFlags_NoDecoration | ImGuiWindowFlags_NoMove |
                                         ImGuiWindowFlags_NoSavedSettings | ImGuiWindowFlags_NoBringToFrontOnFocus);
     UiModelTick();                       // re-target when the director moved on
     s_view.liveNow = UiLive();           // ONE sample per frame (motion detection)
+    if (ImGui::SmallButton("\xE2\x80\xB9 Home")) UiHomeSetScreen(SCR_HOME);
+    ImGui::SameLine(0, 12);
+    ImGui::TextColored(kDim, "Advanced. Edits here follow the old rules: a slider moved while the automatic mode runs is gone at the next change unless you save it into the stage's file.");
     DrawHeader();
     ImGui::Separator();
     float fs = ImGui::GetFontSize();
@@ -1438,6 +1505,35 @@ void DrawUi(float w, float h) {
     DrawRight();
     ImGui::EndChild();
     ImGui::End();
+}
+
+// ui3 B1 (NEXT-ui3.md; reverses D3 of 2026-09-25): an open window holds NOTHING, so the owner can watch the
+// automatic mode with it open. The old edit hold (the stage timer's CyclePause(600) re-armed by input + the
+// clocks' ClocksHold) is taken only while ADVANCED shows one of its LOOK panes (an edit there would otherwise be
+// fought by the director and lost at a stage change), and let go when that pane or ADVANCED is left.
+bool s_editHold = false;
+bool EditHoldWanted() { return UiHomeScreen() == SCR_ADVANCED && ShownPane() != T_CYCLE; }
+void UpdateEditHold() {
+    const bool want = s_view.live && EditHoldWanted();
+    if (want == s_editHold) return;
+    s_editHold = want;
+    if (want) {
+        s_view.lastPauseArm = GetTickCount64();
+        if (!s_view.noEditPause) UiCyclePauseForEditing();
+        UiClocksHold(true);
+    } else {
+        UiCycleResumeEditing();
+        UiClocksHold(false);
+        UiUnfreezeAll();                 // the Advanced pane's freezes go with it, as at a window close
+    }
+}
+
+// ui3: the window opens on HOME; ADVANCED is today's window
+void DrawUi(float w, float h) {
+    UpdateEditHold();
+    if (UiHomeScreen() == SCR_ADVANCED) DrawAdvancedUi(w, h);
+    else UiHomeDraw(w, h, s_view.live);
+    UpdateEditHold();                    // a click this frame may have changed the screen or the pane
 }
 
 // ============================================================================ live window
@@ -1510,9 +1606,11 @@ void RenderLive() {
         if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
         DestroyDevice();
         ReleaseThumbs();
+        UiHomeDeviceReleased();
         if (!CreateDeviceAndSwap(s_wnd)) return;
         ImGui_ImplDX11_Init(s_dev.Get(), s_ctx.Get());
         LoadThumbs(s_dev.Get());
+        UiHomeDeviceCreated(s_dev.Get());
         s_deviceLost = false;
     }
     RECT rc;
@@ -1550,8 +1648,9 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
     case WM_MOUSEMOVE: case WM_LBUTTONDOWN: case WM_LBUTTONUP: case WM_RBUTTONDOWN: case WM_RBUTTONUP:
     case WM_MOUSEWHEEL: case WM_KEYDOWN: case WM_KEYUP: case WM_CHAR: case WM_SETFOCUS: case WM_KILLFOCUS:
         s_lastInput = GetTickCount64();
+        if (!s_editHold) break;          // ui3 B1: only an Advanced look pane holds anything
         UiClocksHold(true);              // brief CLOCKS pre-flight 7: re-armed on input (never a timeout)
-        // window open => the cycle's dwell timer waits; each input re-arms the 10-minute
+        // the edit hold => the cycle's dwell timer waits; each input re-arms the 10-minute
         // auto-resume (a forgotten window must not stop the cycle forever)
         if (!s_view.noEditPause && s_lastInput - s_view.lastPauseArm > 5000) {
             s_view.lastPauseArm = s_lastInput;
@@ -1601,7 +1700,10 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
         UiCycleResumeEditing();          // closing resumes the cycle ...
         UiUnfreezeAll();                 // ... and lets every held animator go
         UiClocksHold(false);             // brief CLOCKS pre-flight 7: the ONLY release
+        s_editHold = false;
         ReleaseThumbs();
+        UiHomeDeviceReleased();
+        UiHomeWindowClosed();            // ui3 B5: the picture of now stops; the renderer frees its readback
         if (s_imgui) {
             ImGui::SetCurrentContext(s_imgui);
             if (ImGui::GetIO().BackendRendererUserData) ImGui_ImplDX11_Shutdown();
@@ -1620,7 +1722,100 @@ LRESULT CALLBACK SettingsProc(HWND hwnd, UINT msg, WPARAM wp, LPARAM lp) {
 struct HeadlessOpts {
     std::wstring shot, dump, search, script, chips, presetsDir, pane;
     int w = 1600, h = 1000;
+    bool live = false;             // --ui-live: the real window on this scripted state (no renderer)
 };
+
+// The headless frame machine (WARP device + offscreen target + an ImGui context). Made before the script when the
+// script presses controls (click / drag), else before the shot as it always was.
+struct HeadlessGpu {
+    ComPtr<ID3D11Device> dev;
+    ComPtr<ID3D11DeviceContext> ctx;
+    ComPtr<ID3D11Texture2D> rt, staging;
+    ComPtr<ID3D11RenderTargetView> rtv;
+    ImGuiContext* im = nullptr;
+    int w = 0, h = 0;
+    bool ready = false;
+};
+HeadlessGpu s_hg;
+bool s_uiLive = false;             // --ui-live: ShowSettingsWindow without a renderer
+
+bool HeadlessGpuInit(int w, int h) {
+    if (s_hg.ready) return true;
+    D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
+    if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                                 &fl, 1, D3D11_SDK_VERSION, &s_hg.dev, nullptr, &s_hg.ctx))) {
+        fprintf(stderr, "[ui] WARP device failed\n");
+        return false;
+    }
+    D3D11_TEXTURE2D_DESC td = {};
+    td.Width = w; td.Height = h; td.MipLevels = 1; td.ArraySize = 1;
+    td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
+    td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
+    s_hg.dev->CreateTexture2D(&td, nullptr, &s_hg.rt);
+    s_hg.dev->CreateRenderTargetView(s_hg.rt.Get(), nullptr, &s_hg.rtv);
+    td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
+    s_hg.dev->CreateTexture2D(&td, nullptr, &s_hg.staging);
+    s_hg.im = ImGui::CreateContext();
+    ImGui::SetCurrentContext(s_hg.im);
+    LoadFonts();
+    ApplyStyle(1.0f);
+    ImGuiIO& io = ImGui::GetIO();
+    io.DisplaySize = ImVec2((float)w, (float)h);
+    io.DeltaTime = 1.0f / 30.0f;
+    ImGui_ImplDX11_Init(s_hg.dev.Get(), s_hg.ctx.Get());
+    LoadThumbs(s_hg.dev.Get());
+    UiHomeDeviceCreated(s_hg.dev.Get());
+    s_hg.w = w; s_hg.h = h;
+    s_hg.ready = true;
+    return true;
+}
+void HeadlessGpuFrame() {
+    ImGuiIO& io = ImGui::GetIO();
+    io.DeltaTime = 1.0f / 30.0f;
+    ImGui_ImplDX11_NewFrame();
+    ImGui::NewFrame();
+    DrawUi((float)s_hg.w, (float)s_hg.h);
+    ImGui::Render();
+    const float clear[4] = { 0.110f, 0.114f, 0.133f, 1 };
+    s_hg.ctx->OMSetRenderTargets(1, s_hg.rtv.GetAddressOf(), nullptr);
+    s_hg.ctx->ClearRenderTargetView(s_hg.rtv.Get(), clear);
+    ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
+}
+void HeadlessGpuShutdown() {
+    if (!s_hg.ready) return;
+    ReleaseThumbs();
+    UiHomeDeviceReleased();
+    ImGui_ImplDX11_Shutdown();
+    ImGui::DestroyContext(s_hg.im);
+    s_hg = HeadlessGpu();
+}
+// --ui-script "click X Y" / "drag X1 Y1 X2 Y2": real mouse input through ImGui's io, in the 1280 x 800 design
+// coordinates of the screen on show (window pixels on ADVANCED), so a script presses the real controls. The new
+// screens act on it as a live window would (UiHomeSetActs); one event per frame (ImGui's input trickle).
+ImVec2 ScriptPoint(float x, float y) {
+    if (UiHomeScreen() == SCR_ADVANCED) return ImVec2(x, y);
+    return UiHomeToWindow(x, y, (float)s_hg.w, (float)s_hg.h);
+}
+std::string ScriptMouse(const std::vector<ImVec2>& path) {
+    if (!s_hg.ready) return "no frame machine";
+    ImGuiIO& io = ImGui::GetIO();
+    UiHomeSetActs(true);
+    HeadlessGpuFrame();                                  // the frame the press lands on is laid out
+    io.AddMousePosEvent(path.front().x, path.front().y);
+    HeadlessGpuFrame();                                  // hover
+    io.AddMouseButtonEvent(0, true);
+    HeadlessGpuFrame();                                  // press
+    for (size_t k = 1; k < path.size(); k++) {
+        io.AddMousePosEvent(path[k].x, path[k].y);
+        HeadlessGpuFrame();                              // drag steps
+    }
+    io.AddMouseButtonEvent(0, false);
+    HeadlessGpuFrame();                                  // release = the click
+    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+    HeadlessGpuFrame();                                  // the pointer leaves: no hover left in the shot
+    UiHomeSetActs(false);
+    return "ok";
+}
 
 bool WritePngRgba(const std::wstring& path, const uint8_t* rgba, UINT w, UINT h, UINT pitch) {
     ComPtr<IWICImagingFactory> f;
@@ -1671,6 +1866,10 @@ bool WriteDump(const std::wstring& path, const std::vector<std::string>& scriptL
          ", \"mirror\": " + J(h.mirror) + ", \"dirty\": " + std::to_string(h.dirty) + ", \"text\": " + J(h.text) + "},\n";
     o += "  \"neon_in_header\": " + std::string(h.text.find("Neon") != std::string::npos ? "true" : "false") + ",\n";
     o += "  \"selected_tile\": " + std::to_string(SelectedTile()) + ",\n";
+    o += "  \"screen\": \"" + std::string(UiHomeScreenName(UiHomeScreen())) + "\",\n";
+    // ui3 B1: would the live window hold the stage timer + the clocks on this screen? (only an Advanced look pane)
+    o += "  \"window_hold\": " + std::string(EditHoldWanted() ? "true" : "false") + ",\n";
+    o += "  " + UiHomeDumpJson() + ",\n";
     o += "  \"counts\": {\"centre_total\": " + std::to_string(cn.total) + ", \"front\": " + std::to_string(cn.front) +
          ", \"visible\": " + std::to_string(cn.visible) + ", \"disabled\": " + std::to_string(cn.disabled) +
          ", \"hidden\": " + std::to_string(cn.hidden) + ", \"right_column\": " + std::to_string(cn.global) +
@@ -1890,7 +2089,51 @@ std::string RunScript(const std::wstring& script, std::vector<std::string>& log)
             } else if (cmd.rfind("pane ", 0) == 0) {
                 std::string pn = cmd.substr(5);
                 s_view.pane = pn == "cycle" ? T_CYCLE : pn == "A" ? T_ACID : pn == "I" ? T_INK : pn == "F" ? T_FLUID : -1;
-            } else res = "unknown command";
+            } else if (cmd.rfind("click ", 0) == 0) {           // click X Y (design px of the screen on show)
+                float x = 0, y = 0;
+                if (sscanf_s(cmd.c_str() + 6, "%f %f", &x, &y) != 2) res = "usage: click X Y";
+                else res = ScriptMouse({ ScriptPoint(x, y) });
+            } else if (cmd.rfind("drag ", 0) == 0) {            // drag X1 Y1 X2 Y2 (12 steps between)
+                float x1 = 0, y1 = 0, x2 = 0, y2 = 0;
+                if (sscanf_s(cmd.c_str() + 5, "%f %f %f %f", &x1, &y1, &x2, &y2) != 4) res = "usage: drag X1 Y1 X2 Y2";
+                else {
+                    std::vector<ImVec2> path;
+                    for (int k = 0; k <= 12; k++)
+                        path.push_back(ScriptPoint(x1 + (x2 - x1) * k / 12.0f, y1 + (y2 - y1) * k / 12.0f));
+                    res = ScriptMouse(path);
+                }
+            } else if (cmd.rfind("wheel ", 0) == 0) {           // wheel X Y STEPS (+ = up), design px of the screen on show
+                float x = 0, y = 0, d = 0;
+                if (sscanf_s(cmd.c_str() + 6, "%f %f %f", &x, &y, &d) != 3) res = "usage: wheel X Y STEPS";
+                else if (!s_hg.ready) res = "no frame machine";
+                else {
+                    ImGuiIO& io = ImGui::GetIO();
+                    const ImVec2 p = ScriptPoint(x, y);
+                    UiHomeSetActs(true);
+                    io.AddMousePosEvent(p.x, p.y);
+                    HeadlessGpuFrame();
+                    io.AddMouseWheelEvent(0.0f, d);
+                    HeadlessGpuFrame();
+                    io.AddMousePosEvent(-FLT_MAX, -FLT_MAX);
+                    HeadlessGpuFrame();
+                    UiHomeSetActs(false);
+                }
+            } else if (cmd.rfind("type ", 0) == 0 && s_hg.ready && UiHomeScreen() == SCR_ADD) {
+                // type <text> into ADD A PAIR's real name field: a click on it (its text is selected), the characters,
+                // then a click on the black where there is no control (the field lets go)
+                const ImVec2 f = UiHomeAddFieldPoint(), b = UiHomeBlankPoint();
+                res = ScriptMouse({ ScriptPoint(f.x, f.y) });
+                if (res == "ok") {
+                    ImGui::GetIO().AddInputCharactersUTF8(cmd.substr(5).c_str());
+                    HeadlessGpuFrame();
+                    HeadlessGpuFrame();
+                    res = ScriptMouse({ ScriptPoint(b.x, b.y) });
+                    if (res == "ok") res = "ok (typed into the field)";
+                }
+            } else {                                            // ui3 HOME: screen clock now keep visit paused rate never pick
+                res = UiHomeScript(cmd);
+                if (res.empty()) res = "unknown command";
+            }
             char b[64];
             snprintf(b, sizeof(b), " -> %s, dirty %d", res.c_str(), UiDirtyCount());
             log.push_back(cmd + b);
@@ -1916,7 +2159,8 @@ void ShowSettingsWindow() {
         SetForegroundWindow(s_wnd);
         return;
     }
-    if (!g_renderer || !UiModelReady()) { WpLog("settings: no renderer/model, not opening"); return; }
+    // --ui-live opens the window with no renderer (the headless state, read-only); the app never does
+    if ((!g_renderer && !s_uiLive) || !UiModelReady()) { WpLog("settings: no renderer/model, not opening"); return; }
     s_view.live = true;
 
     static bool registered = false;
@@ -1967,10 +2211,12 @@ void ShowSettingsWindow() {
     ImGui_ImplWin32_Init(s_wnd);
     ImGui_ImplDX11_Init(s_dev.Get(), s_ctx.Get());
     LoadThumbs(s_dev.Get());
+    if (!s_uiLive) UiHomeOnOpen();       // ui3: the window opens on HOME (--ui-live: where the script left it)
+    UiHomeDeviceCreated(s_dev.Get());
     s_view.noEditPause = false;
     s_view.lastPauseArm = GetTickCount64();
-    UiCyclePauseForEditing();            // D3: window open => the dwell timer pauses
-    UiClocksHold(true);                  // brief CLOCKS pre-flight 7: the clocks glide to 1
+    s_editHold = false;                  // ui3 B1: HOME holds nothing (D3 reversed); UpdateEditHold takes the
+                                         // old hold only on an Advanced look pane
     SetTimer(s_wnd, kTimerId, 33, nullptr);
     ShowWindow(s_wnd, SW_SHOW);
     SetForegroundWindow(s_wnd);
@@ -1984,6 +2230,7 @@ void ShowSettingsWindow() {
 // loaded cfg from --ini; nothing here writes an ini, the registry or %APPDATA%.
 int UiRunHeadless(FluidConfig& cfg, int argc, wchar_t** argv) {
     HeadlessOpts o;
+    bool legacyQueue = false;
     for (int i = 1; i < argc; i++) {
         auto next = [&](std::wstring& dst) { if (i + 1 < argc) dst = argv[++i]; };
         if (!wcscmp(argv[i], L"--ui-shot")) next(o.shot);
@@ -1993,8 +2240,48 @@ int UiRunHeadless(FluidConfig& cfg, int argc, wchar_t** argv) {
         else if (!wcscmp(argv[i], L"--ui-chips")) next(o.chips);
         else if (!wcscmp(argv[i], L"--ui-presets-dir")) next(o.presetsDir);
         else if (!wcscmp(argv[i], L"--ui-pane")) next(o.pane);
+        else if (!wcscmp(argv[i], L"--ui-now-image") && i + 1 < argc) UiHomeSetNowImage(argv[++i]);
+        else if (!wcscmp(argv[i], L"--ui-combos") && i + 1 < argc) {
+            // the pair list for this shot (the usual search reads %APPDATA% first); before anything loads it
+            if (!UiLoadCombosFrom(argv[++i])) fprintf(stderr, "[ui] --ui-combos: not used (no [combos] lines, or the list had loaded)\n");
+        }
+        else if (!wcscmp(argv[i], L"--ui-queue") && i + 1 < argc) {
+            // --ui-queue "<combo>:<mode>[,...]": the LOOKS table's "show next" block as the rated pool shows it,
+            // with these looks queued (headless layout proof; no director runs, the Now line is a sample)
+            UiQueueHeadless("blue coral, vivid (white light)");
+            legacyQueue = true;
+            std::string v = UiNarrow(argv[++i]);
+            size_t pos = 0;
+            while (pos < v.size()) {
+                size_t e = v.find(',', pos);
+                if (e == std::string::npos) e = v.size();
+                const std::string tok = v.substr(pos, e - pos);
+                const size_t c = tok.find(':');
+                const std::string nm = tok.substr(0, c);
+                for (int k = 0; k < UiStillCount(); k++) {
+                    std::string sn = UiStillName(k);
+                    for (char& ch : sn) if (ch == ' ') ch = '_';
+                    if (sn == nm) UiQueueStill(k, c == std::string::npos ? 0 : atoi(tok.c_str() + c + 1));
+                }
+                pos = e + 1;
+            }
+        }
+        else if (!wcscmp(argv[i], L"--ui-appdata") && i + 1 < argc) {
+            // headless test of ADD A PAIR's writes: combos.ini and the [looks] keys of this feature go to this folder
+            // (made if missing) instead of %APPDATA%\FluidWallpaper, and only these two writes are allowed
+            const std::wstring dir = argv[++i];
+            CreateDirectoryW(dir.c_str(), nullptr);
+            UiSetAppdataOverride(dir);
+            printf("[ui] --ui-appdata: Keep this pair / Remove write to %ls (combos.ini, settings.ini)\n", dir.c_str());
+        }
         else if (!wcscmp(argv[i], L"--ui-size") && i + 1 < argc) swscanf_s(argv[++i], L"%dx%d", &o.w, &o.h);
+        else if (!wcscmp(argv[i], L"--ui-live")) o.live = true;
     }
+    // a script that presses controls needs the frame machine before it runs (not under --ui-live: the real window
+    // takes the clicks there)
+    const std::string scriptN = UiNarrow(o.script);
+    const bool scriptMouse = !o.live && (scriptN.find("click ") != std::string::npos || scriptN.find("drag ") != std::string::npos ||
+                                         scriptN.find("type ") != std::string::npos || scriptN.find("wheel ") != std::string::npos);
     UiModelInit(cfg);
     if (!UiModelErrors().empty()) {
         for (auto& e : UiModelErrors()) fprintf(stderr, "[ui] %s\n", e.c_str());
@@ -2006,7 +2293,11 @@ int UiRunHeadless(FluidConfig& cfg, int argc, wchar_t** argv) {
     s_view = View();
     s_view.live = false;
     s_headlessCfg = &cfg;
+    // ui3: HOME, unless the run asks for something only today's window has (the old capture commands keep working)
+    UiHomeOnOpen();
+    if (!o.pane.empty() || !o.search.empty() || !o.chips.empty() || legacyQueue) UiHomeSetScreen(SCR_ADVANCED);
     std::vector<std::string> log;
+    if (scriptMouse && !HeadlessGpuInit(o.w, o.h)) return 3;
     if (!o.script.empty()) RunScript(o.script, log);
     for (auto& l : log) printf("[ui-script] %s\n", l.c_str());
     for (auto& l : s_view.opLog) printf("[ui-op] %s\n", l.c_str());
@@ -2020,61 +2311,36 @@ int UiRunHeadless(FluidConfig& cfg, int argc, wchar_t** argv) {
     if (o.chips.find(L"alllooks") != std::wstring::npos) s_view.thisLook = false;
 
     int rc = 0;
+    if (o.live) {
+        // --ui-live: the REAL window (hardware D3D11, interactive) on this scripted, read-only state; no renderer,
+        // no WorkerW, no tray, no mutex, nothing written (g_configReadOnly). Ends when the window is closed.
+        s_uiLive = true;
+        ShowSettingsWindow();
+        if (!s_wnd) { fprintf(stderr, "[ui] --ui-live: the window did not open\n"); return 3; }
+        MSG msg;
+        while (s_wnd && GetMessageW(&msg, nullptr, 0, 0) > 0) {
+            TranslateMessage(&msg);
+            DispatchMessageW(&msg);
+        }
+        s_uiLive = false;
+        return UiModelErrors().empty() ? 0 : 4;
+    }
     if (!o.dump.empty()) {
         if (WriteDump(o.dump, log)) printf("[ui] dump: %ls\n", o.dump.c_str());
         else { fprintf(stderr, "[ui] cannot write %ls\n", o.dump.c_str()); rc = 2; }
     }
     if (!o.shot.empty()) {
-        ComPtr<ID3D11Device> dev;
-        ComPtr<ID3D11DeviceContext> ctx;
-        D3D_FEATURE_LEVEL fl = D3D_FEATURE_LEVEL_11_0;
-        if (FAILED(D3D11CreateDevice(nullptr, D3D_DRIVER_TYPE_WARP, nullptr, D3D11_CREATE_DEVICE_BGRA_SUPPORT,
-                                     &fl, 1, D3D11_SDK_VERSION, &dev, nullptr, &ctx))) {
-            fprintf(stderr, "[ui] WARP device failed\n");
-            return 3;
-        }
-        D3D11_TEXTURE2D_DESC td = {};
-        td.Width = o.w; td.Height = o.h; td.MipLevels = 1; td.ArraySize = 1;
-        td.Format = DXGI_FORMAT_R8G8B8A8_UNORM; td.SampleDesc.Count = 1;
-        td.Usage = D3D11_USAGE_DEFAULT; td.BindFlags = D3D11_BIND_RENDER_TARGET;
-        ComPtr<ID3D11Texture2D> rt, staging;
-        dev->CreateTexture2D(&td, nullptr, &rt);
-        ComPtr<ID3D11RenderTargetView> rtv;
-        dev->CreateRenderTargetView(rt.Get(), nullptr, &rtv);
-        td.Usage = D3D11_USAGE_STAGING; td.BindFlags = 0; td.CPUAccessFlags = D3D11_CPU_ACCESS_READ;
-        dev->CreateTexture2D(&td, nullptr, &staging);
-
-        ImGuiContext* ctxIm = ImGui::CreateContext();
-        ImGui::SetCurrentContext(ctxIm);
-        LoadFonts();
-        ApplyStyle(1.0f);
-        ImGuiIO& io = ImGui::GetIO();
-        io.DisplaySize = ImVec2((float)o.w, (float)o.h);
-        io.DeltaTime = 1.0f / 30.0f;
-        ImGui_ImplDX11_Init(dev.Get(), ctx.Get());
-        LoadThumbs(dev.Get());
-        for (int f = 0; f < 4; f++) {      // a few frames so layout / tab selection settle
-            io.DeltaTime = 1.0f / 30.0f;
-            ImGui_ImplDX11_NewFrame();
-            ImGui::NewFrame();
-            DrawUi((float)o.w, (float)o.h);
-            ImGui::Render();
-            const float clear[4] = { 0.110f, 0.114f, 0.133f, 1 };
-            ctx->OMSetRenderTargets(1, rtv.GetAddressOf(), nullptr);
-            ctx->ClearRenderTargetView(rtv.Get(), clear);
-            ImGui_ImplDX11_RenderDrawData(ImGui::GetDrawData());
-        }
-        ctx->CopyResource(staging.Get(), rt.Get());
+        if (!HeadlessGpuInit(o.w, o.h)) return 3;
+        for (int f = 0; f < 4; f++) HeadlessGpuFrame();   // a few frames so layout / tab selection settle
+        s_hg.ctx->CopyResource(s_hg.staging.Get(), s_hg.rt.Get());
         D3D11_MAPPED_SUBRESOURCE m = {};
-        if (SUCCEEDED(ctx->Map(staging.Get(), 0, D3D11_MAP_READ, 0, &m))) {
+        if (SUCCEEDED(s_hg.ctx->Map(s_hg.staging.Get(), 0, D3D11_MAP_READ, 0, &m))) {
             bool ok = WritePngRgba(o.shot, (const uint8_t*)m.pData, o.w, o.h, m.RowPitch);
-            ctx->Unmap(staging.Get(), 0);
+            s_hg.ctx->Unmap(s_hg.staging.Get(), 0);
             if (ok) printf("[ui] shot: %ls (%dx%d, WARP)\n", o.shot.c_str(), o.w, o.h);
             else { fprintf(stderr, "[ui] cannot write %ls\n", o.shot.c_str()); rc = 2; }
         }
-        ReleaseThumbs();
-        ImGui_ImplDX11_Shutdown();
-        ImGui::DestroyContext(ctxIm);
     }
+    HeadlessGpuShutdown();
     return UiModelErrors().empty() ? rc : 4;
 }

@@ -53,6 +53,8 @@
 #include <string>
 #include <vector>
 
+double CycleHoldClock();   // cycle.cpp (ui3 Keep this): the wall clock, the wallpaper time under --shot
+
 namespace {
 
 // murk_k / motes (post-night T3 ruling): the water the combo brings, read only while director_water is on:
@@ -75,6 +77,15 @@ const ComboSeed kComboSeed[] = {
 std::vector<Combo> s_combos;
 bool s_loaded = false;
 void (*s_log)(const char*) = nullptr;
+// ui3 add / remove a pair (2026-11-23): per-combo flags, parallel to s_combos (missing = 0 = an ordinary pair, so a
+// list nobody added to or removed from reads exactly as before). DRAFT = added by the Settings window and not kept
+// yet (ratings 0: only the queue reaches it); HIDDEN = removed / cancelled this session (ratings 0, never drawn,
+// erased at the next start because it is not in combos.ini). Never erased while running: indices stay valid.
+enum { CF_DRAFT = 1, CF_HIDDEN = 2 };
+std::vector<unsigned char> s_flags;
+unsigned ComboFlags(int i) { return (i >= 0 && i < (int)s_flags.size()) ? s_flags[i] : 0u; }
+bool Excluded(int i) { return (ComboFlags(i) & (CF_DRAFT | CF_HIDDEN)) != 0; }
+std::wstring s_source;                     // the file the list came from ("" = the compiled-in seed)
 
 void Log(const char* fmt, ...) {
     char buf[600];
@@ -120,6 +131,7 @@ void LoadCombos() {
         }
         if (!s_combos.empty()) {
             Log("[director] %d combos from %ls\n", (int)s_combos.size(), cand[c]);
+            s_source = cand[c];            // ui3: DirectorComboSource
             return;
         }
     }
@@ -641,6 +653,7 @@ float LookRate(int i, int m) {
 }
 void ApplyLooksIni(const wchar_t* ini) {           // a key that is not in the file keeps its value
     for (int i = 0; i < (int)s_combos.size(); i++) for (int m = 0; m < 2; m++) {
+        if (Excluded(i)) continue;                 // ui3: a draft / removed pair's ratings are the Settings window's
         wchar_t key[160], buf[32] = {};
         _snwprintf_s(key, _TRUNCATE, L"%s_%s", s_combos[i].name.c_str(), m ? L"pair" : L"white");
         if (GetPrivateProfileStringW(L"looks", key, L"", buf, 32, ini) > 0)
@@ -649,14 +662,38 @@ void ApplyLooksIni(const wchar_t* ini) {           // a key that is not in the f
 }
 void EnsureRates() {                               // the combo list (loads on first use) + every waiting [looks]
     LoadCombos();
-    for (int m = 0; m < 2; m++) if (s_rate[m].size() != s_combos.size()) s_rate[m].assign(s_combos.size(), 5.0f);
+    // ui3: a list that GREW (DirectorAddCombo) keeps every rating it had, the new pair gets 5; the first load (from
+    // empty) and any other size change are as before
+    for (int m = 0; m < 2; m++) {
+        if (s_rate[m].size() < s_combos.size()) s_rate[m].resize(s_combos.size(), 5.0f);
+        else if (s_rate[m].size() != s_combos.size()) s_rate[m].assign(s_combos.size(), 5.0f);
+    }
     for (const std::wstring& p : s_looksIni) ApplyLooksIni(p.c_str());
     s_looksIni.clear();
 }
+// THE QUEUE (user 2026-11-21: "in the ui can i queue stuff?", "ok add that"): the looks the user lined up with the
+// Settings window's "show next" buttons, in order. While it holds anything PoolDraw takes its front instead of
+// drawing by rating (an entry for the still that is already on screen is dropped); a queued pick uses no random
+// draw, and an EMPTY queue is the code of before, draw for draw. Not saved anywhere: a queue is for now.
+std::vector<std::pair<int, int>> s_queue;          // (combo, mode 0 white / 1 darkroom pair)
+// the still in flight / on screen was the user's queued pick: a look queued now waits for that hold's full end
+// (its own hold is not cut short); else a look queued into an empty line ends the hold at once (NEXT)
+bool  s_qTaken = false;
+bool  s_skipByQueue = false;                       // the pending NEXT came from the queue (a clear withdraws it)
 void PoolDraw(int curMode, bool otherComboOnly) {
     EnsureRates();
     const int n = (int)s_combos.size();
-    auto cand = [&](int i, int m) { return i != s_cur ? true : (!otherComboOnly && m != curMode); };
+    s_qTaken = false;
+    while (!s_queue.empty()) {
+        const int qi = s_queue.front().first, qm = s_queue.front().second;
+        s_queue.erase(s_queue.begin());
+        if (qi < 0 || qi >= n || (qi == s_cur && qm == curMode)) continue;
+        s_plCombo = qi; s_plMode = qm; s_qTaken = true;
+        Log("[director] QUEUE: the user's pick %ls %s (%d more in the queue)\n", s_combos[qi].name.c_str(),
+            qm ? "pair" : "white", (int)s_queue.size());
+        return;
+    }
+    auto cand = [&](int i, int m) { return Excluded(i) ? false : i != s_cur ? true : (!otherComboOnly && m != curMode); };
     float sum = 0.0f; int cnt = 0;
     for (int i = 0; i < n; i++) for (int m = 0; m < 2; m++) if (cand(i, m)) { sum += LookRate(i, m); cnt++; }
     s_plCombo = s_cur; s_plMode = 1 - curMode;     // no candidate at all (one combo, first move): its other mode
@@ -901,6 +938,15 @@ void PickNext() {                                  // StartTrip's choice: not th
     s_next = j;
 }
 
+// ui3 Keep this (DirectorKeep, 2026-11-23): the hold on screen does not end before this time on the cycle's hold clock.
+// 0 = no keep: every line that reads it is skipped, the chapter step is today's.
+double s_keepUntil = 0.0;
+void KeepTick() {
+    if (CycleHoldClock() < s_keepUntil) return;
+    Log("[keep] director: the keep is over at t=%.1f (%s); the hold may end\n", s_clock, kChapName[s_ch]);
+    s_keepUntil = 0.0;
+}
+
 void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const FluidRenderer* r) {
     const float R = fmaxf(a.directorRest, 10.0f), sR = R / 180.0f;
     const bool cadMove = a.directorMove > 0.5f, cadHold = a.directorHold > 0.5f;   // the cadence keys
@@ -910,6 +956,7 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
     float share = 0.0f;                            // the visible share past the patch seam
     const bool haveS = r && r->Hue2FieldShare(0.62f, share);
     s_cT += dt;
+    if (s_keepUntil > 0.0) KeepTick();             // ui3 Keep this: its end, logged when it comes
     auto waited = [&](bool cond) { return s_cT > 240.0f || (s_cT > 8.0f && (have ? cond : s_cT > 75.0f)); };
     auto go = [&](int step, float len) {
         Log("[director] t=%.1f CHAPTER %ls: %s -> %s after %.0f s (field %.2f..%.2f, patch share %.2f)\n", s_clock,
@@ -965,22 +1012,26 @@ void ChapterStep(float dt, const LiquidAcidConfig& a, float selfSig, const Fluid
     // T8 direct darkroom (director_dark_path 1) and, on it, the rated pool of stills (2)
     const bool direct = a.directorDarkPath >= 1, pool = a.directorDarkPath == 2;
     // NEXT: only a hold (or the light glide before one) can take it; anything else is already a change on screen
-    if (s_skip && s_ch != CH_WHITE && s_ch != CH_PAIR && s_ch != CH_CLOSE && s_ch != CH_OPEN) {
+    // THE QUEUE: while it holds a look, a NEXT that meets a change on screen (the trip) is KEPT for the hold that
+    // follows (that hold then ends at once and the queue is taken), so a "show next" never waits out a whole hold
+    if (s_skip && s_ch != CH_WHITE && s_ch != CH_PAIR && s_ch != CH_CLOSE && s_ch != CH_OPEN && !(pool && !s_queue.empty())) {
         Log("[director] t=%.1f NEXT dropped: a change is already on screen (%s)\n", s_clock, kChapName[s_ch]);
-        s_skip = false; s_skipWound = false;
+        s_skip = false; s_skipWound = false; s_skipByQueue = false;
     }
     // the hold is over: its time is up, or NEXT was pressed (a DASH in flight finishes first, as at any hold's end).
     // Asked right AFTER garnish() in the two hold steps, where the hold's end has always been tested.
     bool over = false, skip = false;
     auto holdEnd = [&]() {
         over = (s_cT >= s_cLen || s_skip) && s_move == M_NONE;
+        if (over && s_keepUntil > 0.0) over = false;   // ui3 Keep this: the hold waits (timer, queue, NEXT)
         skip = over && s_skip;
-        if (skip) { s_skip = false; s_skipWound = false; }
+        if (skip) { s_skip = false; s_skipWound = false; s_skipByQueue = false; }
     };
     // NEXT with a garnish move in flight: the move's clock is put on a short way out that starts at the envelope's
     // present value (Smooth(u) = e, the smoothstep's inverse), so nothing jumps; asked right BEFORE garnish()
     auto windDown = [&]() {
         if (!s_skip || s_skipWound || s_move == M_NONE) return;
+        if (s_keepUntil > 0.0) return;             // ui3 Keep this: a queued NEXT waits for the keep's end
         const float e = fminf(fmaxf(MoveEnv(), 0.0f), 1.0f);
         const float u = 0.5f - sinf(asinf(1.0f - 2.0f * e) / 3.0f);
         s_mIn = 0.0f; s_mHold = 0.0f; s_mOut = kSkipOut; s_mt = (1.0f - u) * kSkipOut;
@@ -1248,11 +1299,27 @@ float BandTurn(const LiquidAcidConfig& a, float turnNow) {
 }
 
 // Advance the state (CPU only: the fast-forward runs this alone, r = nullptr).
+// ui3 (2026-11-23): the hidden pair (removed, or a cancelled draft) that last landed and was sent on (-1 = none)
+int s_hidLanded = -1;
 void Step(float dt, const LiquidAcidConfig& a, float selfSig, const FluidRenderer* r) {
     s_clock += dt;
     s_pourRampNow = fmaxf(a.directorPourRamp, 0.0f);   // T8: also the trip's pour (0 = today)
     s_t += dt;
     const float mx = fminf(fmaxf(a.directorMix, 0.0f), 1.0f);
+    // ui3: a pair REMOVED (or a draft cancelled) while it was on its way still lands; the first tick it is the pair on
+    // screen in a hold it leaves at once (NEXT, as DirectorSkip), once per landing, instead of holding its full time.
+    // Inert while no pair is hidden: ComboFlags reads 0 for every pair then.
+    if (ComboFlags(s_cur) & CF_HIDDEN) {
+        const bool hold = (s_phase == P_CHAP && (s_ch == CH_WHITE || s_ch == CH_PAIR)) || s_phase == P_REST;
+        if (hold && s_hidLanded != s_cur && !s_skip) {
+            s_hidLanded = s_cur;
+            Log("[director] t=%.1f %ls was removed while on its way: it has landed and leaves now (NEXT)\n", s_clock,
+                s_combos[s_cur].name.c_str());
+            DirectorSkip();
+        }
+    } else if (s_hidLanded >= 0) {
+        s_hidLanded = -1;
+    }
     switch (s_phase) {
     case P_ENTER: {
         const float v = Smooth(s_t / s_len);
@@ -1269,6 +1336,11 @@ void Step(float dt, const LiquidAcidConfig& a, float selfSig, const FluidRendere
             s_firstWhite = true;                   // T8 order: the first move is never the darkroom
             s_skip = false; s_skipWound = false;   // a NEXT from before this engage is not carried over
             s_plCombo = -1;                        // T8 looks: no still in flight
+            s_qTaken = false; s_skipByQueue = false;
+            if (a.directorDarkPath == 2 && !s_queue.empty()) {   // THE QUEUE: a look queued while engaging is taken
+                s_skip = s_skipByQueue = true;                   // at once (the first white hold ends)
+                Log("[director] t=%.1f QUEUE waiting: the first white hold ends at once\n", s_clock);
+            }
             if (a.directorHold > 0.5f) {           // cadence: the first WHITE holds director_hold, then the dash
                 s_cLen *= a.directorHold / fmaxf(a.directorRest, 10.0f);
                 s_gap = fmaxf(s_cLen - 0.5f, 0.0f);
@@ -1408,6 +1480,7 @@ void Engage(FluidRenderer& r, const LiquidAcidConfig& a, float selfSig) {
     int best = 0;
     float bd = 1e9f;
     for (size_t i = 0; i < s_combos.size(); i++) {
+        if (Excluded((int)i)) continue;           // ui3: never engage on a draft / removed pair
         const float d = fabsf(Wrap180(s_combos[i].anchor - h)) + 0.5f * fabsf(Wrap180(s_combos[i].offset - a.filmHue2));
         if (d < bd) { bd = d; best = (int)i; }
     }
@@ -1455,7 +1528,73 @@ std::wstring DirectorLookName(int i) {
     EnsureRates();
     return (i >= 0 && i < (int)s_combos.size()) ? s_combos[i].name : std::wstring();
 }
+// THE QUEUE (see s_queue): the Settings window's "show next". A look goes to the back of the line; when it is the
+// only one and a hold is on screen the move starts at once (NEXT), otherwise it is taken at the next hold's end.
+void  DirectorQueueLook(int i, int mode) {
+    EnsureRates();
+    if (i < 0 || i >= (int)s_combos.size() || s_queue.size() >= 12) return;
+    const std::pair<int, int> q(i, mode ? 1 : 0);
+    if (!s_queue.empty() && s_queue.back() == q) return;      // a double click is one entry
+    if (s_queue.empty() && s_phase == P_CHAP) {                // the look already on screen or on its way: nothing to do
+        int ti = s_cur, tm = 0;
+        switch (s_ch) {
+        case CH_WHITE: break;
+        case CH_PAIR: case CH_CLOSE: tm = 1; break;
+        case CH_OPEN: if (s_plCombo >= 0 && s_plCombo != s_cur) { ti = s_plCombo; tm = s_plMode; } break;
+        case CH_TRIP: ti = s_next; tm = s_lkDark ? 1 : (s_plCombo == s_next ? s_plMode : 0); break;
+        default: ti = -1; break;
+        }
+        if (q == std::pair<int, int>(ti, tm)) {
+            Log("[director] t=%.1f QUEUE: %ls %s is already on screen or on its way, not queued\n", s_clock,
+                s_combos[i].name.c_str(), q.second ? "pair" : "white");
+            return;
+        }
+    }
+    s_queue.push_back(q);
+    Log("[director] t=%.1f QUEUE + %ls %s (%d in the queue)\n", s_clock, s_combos[i].name.c_str(),
+        q.second ? "pair" : "white", (int)s_queue.size());
+    // alone in the line: the hold on screen ends now (NEXT; a change on screen keeps it for the hold that follows),
+    // unless the still on screen / on its way is itself a queued pick: that one keeps its whole hold
+    if (s_queue.size() == 1 && !s_qTaken && DirectorSkip()) s_skipByQueue = true;
+}
+int   DirectorQueueCount() { return (int)s_queue.size(); }
+bool  DirectorQueueAt(int k, int* i, int* mode) {
+    if (k < 0 || k >= (int)s_queue.size()) return false;
+    if (i) *i = s_queue[k].first;
+    if (mode) *mode = s_queue[k].second;
+    return true;
+}
+void  DirectorQueueClear() {                       // a NEXT the queue started and nobody took yet goes too
+    s_queue.clear();
+    if (s_skipByQueue) { s_skip = false; s_skipWound = false; s_skipByQueue = false; }
+    Log("[director] t=%.1f QUEUE cleared\n", s_clock);
+}
+// What is on screen, in plain words (the Settings window's "Now" line); empty while the director is off.
+std::string DirectorNowText() {
+    if (s_phase == P_OFF) return std::string();
+    auto nm = [](int i) {
+        std::string o;
+        if (i >= 0 && i < (int)s_combos.size()) for (wchar_t ch : s_combos[i].name) o += (ch == L'_') ? ' ' : (char)ch;
+        return o;
+    };
+    if (s_phase != P_CHAP) return nm(s_cur);
+    switch (s_ch) {
+    case CH_WHITE: return nm(s_cur) + ", vivid (white light)";
+    case CH_PAIR:  return nm(s_cur) + ", darkroom (two lights)";
+    case CH_CLOSE: return nm(s_cur) + ": the lights are closing to its darkroom";
+    case CH_OPEN:  return nm(s_cur) + ": the lights are opening to white";
+    case CH_TRIP:  return "changing from " + nm(s_cur) + " to " + nm(s_next)
+                        + ((s_lkDark || (s_plCombo >= 0 && s_plMode == 1)) ? " (darkroom)" : " (vivid)");
+    default:       return nm(s_cur) + " (" + kChapName[s_ch] + ")";
+    }
+}
 float DirectorLookRating(int i, int mode) { EnsureRates(); return LookRate(i, mode ? 1 : 0); }
+float DirectorLookRatingSum() {
+    EnsureRates();
+    float s = 0.0f;
+    for (int i = 0; i < (int)s_combos.size(); i++) s += LookRate(i, 0) + LookRate(i, 1);
+    return s;
+}
 void  DirectorSetLookRating(int i, int mode, float v) {
     EnsureRates();
     if (i >= 0 && i < (int)s_combos.size()) s_rate[mode ? 1 : 0][i] = fminf(fmaxf(v, 0.0f), 10.0f);
@@ -1553,4 +1692,336 @@ void DirectorTick(FluidRenderer& r, float dt) {
         s_phase = P_OFF; s_have = false;
         Log("[director] released\n");
     }
+}
+
+// ================================================================================================ ui3 (2026-11-23)
+// Read-only views for the Settings window's HOME screen. Additions only: nothing above this line changed, and
+// nothing below writes any director state (the pair list itself excepted: DirectorLoadCombosFrom, headless only,
+// before the list has loaded).
+float DirectorLookAnchor(int i) {
+    LoadCombos();
+    return (i >= 0 && i < (int)s_combos.size()) ? s_combos[i].anchor : 0.0f;
+}
+float DirectorLookOffset(int i) {
+    LoadCombos();
+    return (i >= 0 && i < (int)s_combos.size()) ? s_combos[i].offset : 180.0f;
+}
+DirectorView DirectorNow() {
+    DirectorView v;
+    if (s_phase == P_OFF) return v;
+    const int n = (int)s_combos.size();
+    auto ok = [n](int i) { return i >= 0 && i < n; };
+    v.active = true;
+    v.combo = ok(s_cur) ? s_cur : -1;
+    if (s_phase == P_CHAP) {
+        switch (s_ch) {
+        case CH_WHITE: v.mode = 0; v.holdLeftSec = fmaxf(s_cLen - s_cT, 0.0f); break;
+        case CH_PAIR:  v.mode = 1; v.holdLeftSec = fmaxf(s_cLen - s_cT, 0.0f); break;
+        case CH_CLOSE: v.mode = 0; v.changing = true; v.toCombo = v.combo; v.toMode = 1; break;
+        case CH_OPEN:
+            v.mode = 1; v.changing = true;
+            if (ok(s_plCombo) && s_plCombo != s_cur) { v.toCombo = s_plCombo; v.toMode = s_plMode; }
+            else { v.toCombo = v.combo; v.toMode = 0; }
+            break;
+        case CH_TRIP:                              // a trip always leaves from white light (a PAIR opens first)
+            v.mode = 0; v.changing = true;
+            v.toCombo = ok(s_next) ? s_next : -1;
+            v.toMode = (s_lkDark || (s_plCombo >= 0 && s_plCombo == s_next && s_plMode == 1)) ? 1 : 0;
+            break;
+        default:                                   // the old darkroom walk (DIM ... LIGHT2): one light or two
+            v.mode = 1; v.changing = true; break;
+        }
+        if (s_skip && v.holdLeftSec > 0.0f) v.holdLeftSec = 0.0f;   // NEXT pressed: the hold ends now
+    } else if (s_phase == P_REST) {
+        v.holdLeftSec = fmaxf(s_len - s_t, 0.0f);
+    } else if (s_phase == P_TRIP) {
+        v.changing = true;
+        v.toCombo = ok(s_next) ? s_next : -1;
+    } else {                                       // ENTER / RELEASE
+        v.changing = true;
+    }
+    if (!v.changing && !s_queue.empty() && ok(s_queue.front().first)) {
+        v.nextCombo = s_queue.front().first;
+        v.nextMode = s_queue.front().second;
+    }
+    v.keepLeftSec = DirectorKeepLeftSec();
+    return v;
+}
+void DirectorKeep(float sec) {
+    if (!(sec > 0.0f)) {
+        if (s_keepUntil > 0.0) Log("[keep] director: let go at t=%.1f (%.0f s early)\n", s_clock, fmax(s_keepUntil - CycleHoldClock(), 0.0));
+        s_keepUntil = 0.0;
+        return;
+    }
+    s_keepUntil = fmax(CycleHoldClock() + sec, 1e-6);
+    Log("[keep] director: the hold of %ls %s is kept %.0f s from t=%.1f (%s)\n",
+        (s_cur >= 0 && s_cur < (int)s_combos.size()) ? s_combos[s_cur].name.c_str() : L"-",
+        s_phase == P_CHAP ? kChapName[s_ch] : "-", sec, s_clock,
+        (s_phase == P_CHAP && (s_ch == CH_WHITE || s_ch == CH_PAIR)) ? "this hold" : "the hold that follows");
+}
+float DirectorKeepLeftSec() { return s_keepUntil > 0.0 ? (float)fmax(s_keepUntil - CycleHoldClock(), 0.0) : 0.0f; }
+bool DirectorLoadCombosFrom(const wchar_t* ini) {
+    if (s_loaded || !ini || !ini[0] || GetFileAttributesW(ini) == INVALID_FILE_ATTRIBUTES) return false;
+    std::vector<Combo> got;
+    std::vector<wchar_t> buf(32768);
+    const DWORD n = GetPrivateProfileSectionW(L"combos", buf.data(), (DWORD)buf.size(), ini);
+    for (const wchar_t* e = buf.data(); e < buf.data() + n && *e; e += wcslen(e) + 1) {   // = LoadCombos' line rule
+        std::wstring line(e);
+        const size_t sc = line.find_first_of(L";#");
+        if (sc == 0) continue;
+        if (sc != std::wstring::npos) line.resize(sc);
+        const size_t eq = line.find(L'=');
+        if (eq == std::wstring::npos) continue;
+        std::wstring nm = line.substr(0, eq);
+        while (!nm.empty() && iswspace(nm.back())) nm.pop_back();
+        while (!nm.empty() && iswspace(nm.front())) nm.erase(nm.begin());
+        Combo k{ nm, 0.0f, 180.0f, 0.25f, 0.5f, 1.0f, -1.0f };
+        if (nm.empty() || swscanf_s(line.c_str() + eq + 1, L" %f , %f , %f , %f , %f , %f",
+                                    &k.anchor, &k.offset, &k.scale, &k.load, &k.murkK, &k.motes) < 2) continue;
+        got.push_back(k);
+    }
+    if (got.empty()) return false;
+    s_combos = got;
+    s_loaded = true;
+    s_source = ini;                                // ui3: DirectorComboSource
+    Log("[director] %d combos from %ls (--ui-combos)\n", (int)s_combos.size(), ini);
+    return true;
+}
+
+// ================================================================================================ ui3 add / remove
+// (2026-11-23; reference/briefs/UI3-PLAN.md "Adding and removing a pair"). Additions only, each inert until its own
+// call: the list only ever GROWS (indices held in s_cur / s_next / s_prev / s_plCombo / the queue / s_rate stay
+// valid); a removed pair is HIDDEN (ratings 0, never drawn, its queue entries dropped) and erased at the next start.
+namespace {
+const wchar_t* const kSeedNames[] = { L"magenta_mint", L"magenta_cyan", L"blue_coral", L"violet_amber", L"teal_orange", L"mint_magenta" };
+void EnsureFlags() { if (s_flags.size() < s_combos.size()) s_flags.resize(s_combos.size(), 0); }
+bool ValidCombo(int i) { return i >= 0 && i < (int)s_combos.size(); }
+// on screen or on its way (the chapter is travelling to it): only Hide's "ratings 0 + skip" may touch it
+bool InFlight(int i) { return s_phase != P_OFF && (i == s_cur || i == s_next || i == s_plCombo); }
+std::wstring FullPath(const std::wstring& p) {
+    wchar_t b[MAX_PATH] = {};
+    const DWORD n = GetFullPathNameW(p.c_str(), MAX_PATH, b, nullptr);
+    return (n > 0 && n < MAX_PATH) ? std::wstring(b) : p;
+}
+bool SameFile(const std::wstring& a, const std::wstring& b) { return !a.empty() && !b.empty() && _wcsicmp(FullPath(a).c_str(), FullPath(b).c_str()) == 0; }
+std::string Narrow(const std::wstring& w) { std::string o; for (wchar_t c : w) o += (c < 128) ? (char)c : '?'; return o; }
+std::wstring ComboValue(const Combo& k) {          // the combos.ini columns: anchor, offset, scale, load, murk_k, motes
+    wchar_t b[160];
+    _snwprintf_s(b, _TRUNCATE, L"%g, %g, %g, %g, %g, %g", k.anchor, k.offset, k.scale, k.load, k.murkK, k.motes);
+    return b;
+}
+// a text file as UTF-8 (a UTF-16 file converted, a UTF-8 BOM dropped); false = unreadable
+bool ReadTextUtf8(const std::wstring& path, std::string& out) {
+    out.clear();
+    HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr, OPEN_EXISTING, 0, nullptr);
+    if (h == INVALID_HANDLE_VALUE) return false;
+    std::string raw;
+    char buf[4096];
+    DWORD got = 0;
+    while (ReadFile(h, buf, sizeof(buf), &got, nullptr) && got > 0) raw.append(buf, got);
+    CloseHandle(h);
+    if (raw.size() >= 2 && (unsigned char)raw[0] == 0xFF && (unsigned char)raw[1] == 0xFE) {
+        const int nw = (int)((raw.size() - 2) / 2);
+        const wchar_t* w = (const wchar_t*)(raw.data() + 2);
+        const int n = WideCharToMultiByte(CP_UTF8, 0, w, nw, nullptr, 0, nullptr, nullptr);
+        out.resize(n > 0 ? n : 0);
+        if (n > 0) WideCharToMultiByte(CP_UTF8, 0, w, nw, &out[0], n, nullptr, nullptr);
+        return true;
+    }
+    if (raw.size() >= 3 && (unsigned char)raw[0] == 0xEF && (unsigned char)raw[1] == 0xBB && (unsigned char)raw[2] == 0xBF) raw.erase(0, 3);
+    out = raw;
+    return true;
+}
+// the lines of a combos.ini before its first [section] line (its comment header), CRLF-ended
+std::string HeaderOf(const std::string& text) {
+    std::string o;
+    size_t p = 0;
+    while (p < text.size()) {
+        size_t e = text.find('\n', p);
+        if (e == std::string::npos) e = text.size();
+        std::string line = text.substr(p, e - p);
+        if (!line.empty() && line.back() == '\r') line.pop_back();
+        const size_t f = line.find_first_not_of(" \t");
+        if (f != std::string::npos && line[f] == '[') break;
+        o += line + "\r\n";
+        p = e + 1;
+    }
+    return o;
+}
+// The %APPDATA% file replaces every other list (LoadCombos reads it first): if the list in use came from another file
+// or from the compiled-in seed, the whole list (every pair that is neither a draft nor removed) is written there
+// FIRST, under the source file's comment header; a file already there that was not the source is kept as .bak.
+// Returns 0 = could not write, 1 = the list already came from that file, 2 = the whole list was copied there now.
+int EnsureTarget(const std::wstring& target, std::string& what) {
+    if (SameFile(s_source, target)) return 1;
+    std::string text, header;
+    if (!s_source.empty() && ReadTextUtf8(s_source, text)) header = HeaderOf(text);
+    if (header.find_first_not_of(" \t\r\n") == std::string::npos)
+        header = "; FluidWallpaper colour pairs (the Settings window wrote this list; it replaces the built-in six).\r\n"
+                 "; name = film anchor deg, patch offset deg, patch scale, patch load, murk_k, motes\r\n";
+    std::string body = header + "[combos]\r\n";
+    int n = 0;
+    for (int i = 0; i < (int)s_combos.size(); i++) {
+        if (Excluded(i)) continue;
+        body += Narrow(s_combos[i].name) + " = " + Narrow(ComboValue(s_combos[i])) + "\r\n";
+        n++;
+    }
+    if (GetFileAttributesW(target.c_str()) != INVALID_FILE_ATTRIBUTES) CopyFileW(target.c_str(), (target + L".bak").c_str(), FALSE);
+    HANDLE h = CreateFileW(target.c_str(), GENERIC_WRITE, 0, nullptr, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (h == INVALID_HANDLE_VALUE) { what += "cannot write " + Narrow(target) + "; "; return 0; }
+    DWORD wr = 0;
+    const BOOL ok = WriteFile(h, body.data(), (DWORD)body.size(), &wr, nullptr);
+    CloseHandle(h);
+    if (!ok || wr != (DWORD)body.size()) { what += "writing " + Narrow(target) + " failed; "; return 0; }
+    what += "the whole list (" + std::to_string(n) + " pairs) copied from " +
+            (s_source.empty() ? std::string("the built-in six") : Narrow(s_source)) + " to " + Narrow(target) + "; ";
+    s_source = target;
+    return 2;
+}
+} // namespace
+
+const char* DirectorHueName(float hue) {
+    struct HN { float h; const char* n; };
+    // DESIGN.md 5.13 + UI3-PLAN (Teal 190): the nearest name; used only to SUGGEST a pair's name
+    static const HN k[] = { { 0, "Red" }, { 15, "Coral" }, { 30, "Orange" }, { 40, "Amber" }, { 58, "Yellow" },
+        { 75, "Chartreuse" }, { 85, "Lime" }, { 115, "Green" }, { 145, "Mint" }, { 185, "Cyan" }, { 190, "Teal" },
+        { 200, "Sky" }, { 215, "Blue" }, { 245, "Indigo" }, { 275, "Violet" }, { 300, "Purple" }, { 325, "Magenta" },
+        { 345, "Pink" } };
+    hue = Wrap360(hue);
+    const char* best = k[0].n;
+    float bd = 1e9f;
+    for (const HN& e : k) {
+        const float d = fabsf(Wrap180(hue - e.h));
+        if (d < bd) { bd = d; best = e.n; }
+    }
+    return best;
+}
+std::wstring DirectorComboKeyFor(const std::wstring& wanted, int ignore) {
+    LoadCombos();
+    std::wstring k;
+    bool gap = false;
+    for (wchar_t c : wanted) {
+        const bool word = (c >= L'a' && c <= L'z') || (c >= L'A' && c <= L'Z') || (c >= L'0' && c <= L'9');
+        if (!word) { gap = true; continue; }
+        if (gap && !k.empty()) k += L'_';
+        gap = false;
+        k += (c >= L'A' && c <= L'Z') ? (wchar_t)(c - L'A' + L'a') : c;
+    }
+    auto ends = [&](const wchar_t* s) { const size_t n = wcslen(s); return k.size() >= n && k.compare(k.size() - n, n, s) == 0; };
+    for (bool again = true; again;) {               // look_* is a rated look's [looks] key; *_white / *_pair a face's
+        again = false;
+        if (k.rfind(L"look_", 0) == 0) { k.erase(0, 5); again = true; }
+        if (ends(L"_white")) { k.resize(k.size() - 6); again = true; }
+        if (ends(L"_pair")) { k.resize(k.size() - 5); again = true; }
+    }
+    if (k.size() > 40) { k.resize(40); while (!k.empty() && k.back() == L'_') k.pop_back(); }
+    if (k.empty()) k = L"pair";
+    auto taken = [&](const std::wstring& nm) {
+        for (int i = 0; i < (int)s_combos.size(); i++)
+            if (i != ignore && !(ComboFlags(i) & CF_HIDDEN) && _wcsicmp(s_combos[i].name.c_str(), nm.c_str()) == 0) return true;
+        return false;
+    };
+    const std::wstring base = k;
+    for (int n = 2; taken(k); n++) k = base + L"_" + std::to_wstring(n);
+    return k;
+}
+int DirectorAddCombo(const std::wstring& name, float anchorHue, float offset, bool draft) {
+    EnsureRates();                                 // the list + every waiting [looks], before it grows
+    EnsureFlags();
+    const std::wstring nm = DirectorComboKeyFor(name, -1);
+    s_combos.push_back({ nm, Wrap360(anchorHue), Wrap360(offset), 0.25f, 0.50f, 1.0f, -1.0f });
+    s_flags.push_back(draft ? CF_DRAFT : 0);
+    EnsureRates();                                 // grows the ratings (5 for the new pair), keeps every other one
+    const int i = (int)s_combos.size() - 1;
+    s_rate[0][i] = s_rate[1][i] = draft ? 0.0f : 5.0f;
+    Log("[director] ADD %ls = %ls (%s, index %d of %d)\n", nm.c_str(), ComboValue(s_combos[i]).c_str(),
+        draft ? "a draft: ratings 0, only the queue reaches it" : "kept: ratings 5", i, (int)s_combos.size());
+    return i;
+}
+bool DirectorUpdateDraft(int i, const std::wstring& name, float anchorHue, float offset) {
+    if (!ValidCombo(i) || ComboFlags(i) != CF_DRAFT || InFlight(i)) return false;
+    s_combos[i].name = DirectorComboKeyFor(name, i);
+    s_combos[i].anchor = Wrap360(anchorHue);
+    s_combos[i].offset = Wrap360(offset);
+    Log("[director] DRAFT %d now %ls = %ls\n", i, s_combos[i].name.c_str(), ComboValue(s_combos[i]).c_str());
+    return true;
+}
+void DirectorCommitCombo(int i) {
+    EnsureRates();
+    EnsureFlags();
+    if (!ValidCombo(i)) return;
+    s_flags[i] = 0;
+    s_rate[0][i] = s_rate[1][i] = 5.0f;
+    Log("[director] KEEP %ls: in the automatic mode, vivid and darkroom 5 of 10\n", s_combos[i].name.c_str());
+}
+void DirectorHideCombo(int i) {
+    EnsureRates();
+    EnsureFlags();
+    if (!ValidCombo(i)) return;
+    s_flags[i] = CF_HIDDEN;
+    s_rate[0][i] = s_rate[1][i] = 0.0f;
+    const size_t before = s_queue.size();
+    for (size_t k = 0; k < s_queue.size();) if (s_queue[k].first == i) s_queue.erase(s_queue.begin() + k); else k++;
+    if (s_queue.empty() && before > 0 && s_skipByQueue) { s_skip = false; s_skipWound = false; s_skipByQueue = false; }
+    Log("[director] HIDE %ls: ratings 0, %d queue entr%s dropped%s; erased at the next start\n", s_combos[i].name.c_str(),
+        (int)(before - s_queue.size()), before - s_queue.size() == 1 ? "y" : "ies", InFlight(i) ? ", on screen / on its way" : "");
+}
+bool DirectorComboHidden(int i) { return (ComboFlags(i) & CF_HIDDEN) != 0; }
+bool DirectorComboIsDraft(int i) { return (ComboFlags(i) & CF_DRAFT) != 0; }
+bool DirectorComboInFlight(int i) { return ValidCombo(i) && InFlight(i); }
+bool DirectorComboIsBuiltIn(int i) {
+    LoadCombos();
+    if (!ValidCombo(i)) return false;
+    for (const wchar_t* n : kSeedNames) if (_wcsicmp(n, s_combos[i].name.c_str()) == 0) return true;
+    return false;
+}
+std::wstring DirectorComboSource() { LoadCombos(); return s_source.empty() ? std::wstring(L"built in") : s_source; }
+std::string DirectorPersistKeep(int i, const wchar_t* combosIni, const wchar_t* settingsIni, bool readOnly) {
+    if (!ValidCombo(i) || Excluded(i)) return "not a kept pair";
+    const Combo& k = s_combos[i];
+    std::string what = "keep " + Narrow(k.name) + ": ";
+    if (readOnly || !combosIni || !combosIni[0] || !settingsIni || !settingsIni[0]) {
+        what += "in memory only, write skipped (read-only config) [would write " + Narrow(k.name) + " = " +
+                Narrow(ComboValue(k)) + " to combos.ini, [looks] " + Narrow(k.name) + "_white = 5 and _pair = 5]";
+        Log("[combos] %s\n", what.c_str());
+        return what;
+    }
+    const int t = EnsureTarget(combosIni, what);
+    if (t == 1) {                                  // the file in use: its line, the owner's comments kept
+        WritePrivateProfileStringW(L"combos", k.name.c_str(), ComboValue(k).c_str(), combosIni);
+        what += "line " + Narrow(k.name) + " = " + Narrow(ComboValue(k)) + " written to " + Narrow(combosIni) + "; ";
+    } else if (t == 2) {
+        what += "(its line " + Narrow(k.name) + " = " + Narrow(ComboValue(k)) + " is in that copy); ";
+    }
+    for (int m = 0; m < 2; m++) {
+        const std::wstring key = k.name + (m ? L"_pair" : L"_white");
+        WritePrivateProfileStringW(L"looks", key.c_str(), L"5", settingsIni);
+    }
+    what += "[looks] " + Narrow(k.name) + "_white = 5, _pair = 5 in " + Narrow(settingsIni);
+    Log("[combos] %s\n", what.c_str());
+    return what;
+}
+std::string DirectorPersistRemove(int i, const wchar_t* combosIni, const wchar_t* settingsIni, bool readOnly) {
+    if (!ValidCombo(i)) return "no such pair";
+    if (DirectorComboIsBuiltIn(i)) return "a built-in pair is never removed";
+    const Combo& k = s_combos[i];
+    std::string what = "remove " + Narrow(k.name) + ": ";
+    if (readOnly || !combosIni || !combosIni[0] || !settingsIni || !settingsIni[0]) {
+        what += "in memory only, write skipped (read-only config) [would delete its combos.ini line and "
+                "[looks] _white, _pair, _white_before_never, _pair_before_never]";
+        Log("[combos] %s\n", what.c_str());
+        return what;
+    }
+    const int t = EnsureTarget(combosIni, what);
+    if (t == 1) {
+        WritePrivateProfileStringW(L"combos", k.name.c_str(), nullptr, combosIni);
+        what += "line " + Narrow(k.name) + " deleted from " + Narrow(combosIni) + "; ";
+    } else if (t == 2) {
+        what += "(the copy leaves " + Narrow(k.name) + " out); ";
+    }
+    for (const wchar_t* sfx : { L"_white", L"_pair", L"_white_before_never", L"_pair_before_never" })
+        WritePrivateProfileStringW(L"looks", (k.name + sfx).c_str(), nullptr, settingsIni);
+    what += "[looks] " + Narrow(k.name) + "_white, _pair, _white_before_never, _pair_before_never deleted from " + Narrow(settingsIni);
+    Log("[combos] %s\n", what.c_str());
+    return what;
 }

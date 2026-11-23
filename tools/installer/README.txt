@@ -37,7 +37,12 @@ NEXT
 SETTINGS
   Click / right-click the Fluid Wallpaper icon in the taskbar tray (maybe
   under the ^ arrow) -> Settings. Presets are in the same tray menu.
-  "Start with Windows" can be switched off in Settings.
+  The window opens on Home: on the coloured side what ends by itself (Next,
+  Keep this for 30 minutes, Pause, a 30-minute visit to Ink or Fluid); on the
+  black side what is kept (the colour pairs and how often each comes up,
+  Never show this, Add a pair, and a list of what you changed, each with an X
+  to undo it). Every older setting is under Advanced.
+  "Start with Windows" can be switched off in Settings -> Display and system.
 
 HDR
   Optional. It looks right with Windows HDR on or off.

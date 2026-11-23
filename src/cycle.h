@@ -138,6 +138,14 @@ struct CycleStage {
     int   tier       = CYCLE_TIER_NONE;   // stage_N_tier (CycleTier)
     float lerpSec    = -1.0f;      // -1 = [cycle] lerp (4 s)
     std::wstring journey;          // bare <name> (journeys\<name>.txt); empty = the file's [journey] file=
+    // stage_N_rating=<key> (user 2026-11-23 on the idea looks: "just add it to the rotation slowly", "just rare",
+    // "well its jsut a low rating. thats all"): a RATED look stage. It is never drawn by tier / weight and never
+    // booted on; ONCE at each dwell end it comes up with chance rating / (the sum of ALL look ratings: the colour
+    // director's stills + every rated stage), so its share of the time is its rating's share, as for a colour
+    // look. The rating lives in settings.ini [looks] <key> (0..10, 2 until rated) and has its row in the Settings
+    // window's LOOKS table. Always entered and left through black, with ITS fades both ways. Empty = today.
+    std::wstring rateKey;
+    float rating = 2.0f;
     // resolved by CycleLoad / CycleSet (not persisted)
     std::wstring name;             // file stem, for menus and logs
     std::wstring path, basePath;   // absolute
@@ -147,6 +155,10 @@ struct CycleStage {
     int   look = CYCLE_LOOK_FLUID; // from the composed config
     bool  ok = false;              // the file exists
     bool  burstOk = false;         // oil, hue_rotate_period on, sweep off: a burst can land
+    // ui3 (2026-11-23) a GUEST stage (CycleVisitGuest: a timed visit to Ink / Fluid from a start preset): appended to
+    // the list for the visit only, never persisted ([cycle] writer, current=), never drawn, not in the playlist the
+    // window shows (CycleListedCount), removed once it is left. false = an ordinary stage (every stage but that one).
+    bool  guest = false;
 };
 
 struct CycleConfig {
@@ -254,4 +266,47 @@ void CycleComposeStageFiles(int stage, FluidConfig& c);
 bool CycleStageComposesBeyondFile(int stage);
 void CycleSet(const CycleConfig& c);          // replace list; persisted to settings.ini
 void CycleJump(int stage);                    // 0-based; fades out to it
+// The rated look stages (stage_N_rating), for the LOOKS table: k = 0 .. count-1 in list order.
+int   CycleRatedCount();
+int   CycleRatedStage(int k);                 // its 0-based stage index (-1 = none)
+float CycleRatedRating(int k);
+void  CycleSetRatedRating(int k, float v);    // clamped 0..10; written to settings.ini [looks] <key>
 CycleStatus CycleState();
+
+// ---- ui3 (2026-11-23): Keep this and visits (the Settings window's HOME; --cycle-keep-at / --cycle-visit-at) -----
+// A HOLD of the stage timer with its own deadline (never CyclePause's s_paused, which the Advanced screen's edit hold
+// uses). While it runs the DWELL timer waits (no dwell end, no midpoint draw, no dark-screen switch); a keep then
+// carries on where it was, a visit (endDwell) ends the dwell with it so the normal draw follows at once. Next
+// (CycleNext: the window's and the tray's) ends a keep and a visit. No hold = every path as before.
+// The hold clock: the wall clock (GetTickCount64 s), so a keep ends on time across a pause (it releases on the first
+// tick after); under --shot main.cpp hands in the wallpaper time (CycleHoldSetClock), so a render test is exact.
+double CycleHoldClock();
+void   CycleHoldSetClock(double wallpaperSec);
+void   CycleHold(float sec, bool endDwell = false, int stage = -1);   // sec <= 0 lets go
+float  CycleHoldLeftSec();                     // 0 = none (or a visit that ends at the next tick)
+bool   CycleHoldIsVisit();
+int    CycleHoldStage();                       // the visited stage (0-based), -1 = none
+void   CycleKeepThis(float sec);               // Keep this: the stage timer (cycle on) + the director's hold (DirectorKeep)
+bool   CycleVisit(int stage, float sec);       // CycleJump + a visit hold; false = the cycle did not take it
+void   CycleVisitEndNow();                     // "Back to automatic now": the visit ends at the next dwell tick
+
+// ---- ui3 (2026-11-23): a timed visit to a look that is not in the stage list (Ink / Fluid) ----------------------
+// CycleVisitGuest appends ONE guest stage (CycleStage::guest) composed from presetPath the way a look stage is (its
+// file and its own [meta] base chain; [cycle] oil_layout is for oil stages only, so an Ink / Fluid guest never gets
+// it), fades to it through black with its warm-up, and holds it sec s with the visit hold (CycleHold endDwell). When
+// the hold ends (or "Back to automatic now" = CycleVisitEndNow, or Next) it is left through the usual draw and then
+// REMOVED from the list. One guest at a time: a second visit replaces the first (the same index, re-entered through
+// black). The pair the colour director showed before the visit is queued (DirectorQueueLook) once the director runs
+// again, unless it came back on that pair by itself. A keep is let go. Never written anywhere: CycleSet ends the visit
+// and strips the guest before it writes [cycle]; PersistCurrent skips it; every draw (Drawable) skips it. Live: refused
+// while the automatic mode is off. Without a renderer (headless --ui-shot) the guest is appended and held but nothing
+// jumps, and letting go of the hold removes it. No guest visit = no line of this runs (every path as before).
+bool   CycleVisitGuest(const std::wstring& presetPath, float sec);
+int    CycleGuestStage();                      // the guest's 0-based index, -1 = none
+std::wstring CycleGuestFile();                 // its preset (absolute), "" = none
+int    CycleListedCount();                     // the stages of the owner's list (every stage but a guest)
+// The start preset of a guest look: kind 0 = Ink ("Ink - inverted.ini"), 1 = Fluid ("WE parity (fluid).ini"), looked
+// for in the folder of [cycle] oil_layout, then the folders of the stage files (the owner's cycle names absolute paths
+// into the main repo's reference\presets), then <exe>\..\reference\presets. "" + why when it is nowhere (no config is
+// ever made up).
+std::wstring CycleGuestPreset(int kind, std::string* why = nullptr);
